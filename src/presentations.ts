@@ -1,17 +1,17 @@
+import { validateAsset, type ImageAsset, type InkletAsset } from "./assets.js";
 import {
-  validateAsset,
-  type ImageAsset,
-  type InkletAsset,
-} from "./assets.js";
-import { ContentsResource, type Content } from "./contents.js";
+  type Analysis,
+  type AnalysisContext,
+  type AnalysesResource,
+  type WaitForAnalysisOptions,
+} from "./analyses.js";
+import { ContentsResource, parseProblem } from "./contents.js";
 import {
   ConfigurationError,
   InvalidResponseError,
-  OperationAbortedError,
-  OperationTimeoutError,
-  PresentationGenerationError,
+  NoChangeError,
 } from "./errors.js";
-import { ContentSubmissionRunner, type PushResult } from "./push.js";
+import { toPushResult, type PushResult } from "./push.js";
 import {
   SDK_API_PREFIX,
   appendCursorAndLimit,
@@ -82,13 +82,15 @@ export interface Presentation {
   /** Derived from whether `displayId` is present. */
   kind: "generated" | "display";
   displayId: string | null;
+  /** The Analysis that produced this Presentation, when the backend reports it. */
+  analysisId: string | null;
   contentIds: readonly string[];
   mode: "auto" | "manual" | "hardcode" | "";
   state: PresentationState;
   output: PresentationOutput | null;
   scene: PresentationScene | null;
   renditions: readonly PresentationRendition[];
-  /** @deprecated Prefer `renditions`; this remains for v0.1 Display reads. */
+  /** @deprecated Prefer `renditions`; this remains for Display reads. */
   image: PresentationImage | null;
   failure: PresentationProblem | null;
   createdAt: string;
@@ -117,6 +119,7 @@ interface GenerateBaseInput {
   idempotencyKey?: string;
   intent?: string;
   title?: string;
+  context?: AnalysisContext;
   output?: PresentationOutputRequest;
 }
 
@@ -134,18 +137,10 @@ export type GeneratePresentationInput =
   | GenerateAutoPresentationInput
   | GenerateHardcodePresentationInput;
 
-export interface PresentationGeneration extends PushResult {
-  /** The targetless path creates exactly one Presentation once ready. */
-  presentationIds: readonly string[];
-}
+/** The uploaded Content plus the targetless Analysis started for it. */
+export type PresentationGeneration = PushResult;
 
-export interface WaitUntilReadyOptions {
-  /** Defaults to 1,000 ms. */
-  pollIntervalMs?: number;
-  /** Defaults to 120,000 ms. */
-  timeoutMs?: number;
-  signal?: AbortSignal;
-}
+export type WaitUntilReadyOptions = WaitForAnalysisOptions;
 
 export interface CreatePresentationRenditionInput {
   preset?: string;
@@ -156,20 +151,21 @@ export interface CreatePresentationRenditionInput {
 export class PresentationsResource {
   readonly #transport: ResourceTransport;
   readonly #contents: ContentsResource;
-  readonly #submission: ContentSubmissionRunner;
+  readonly #analyses: AnalysesResource;
 
   constructor(
     transport: ResourceTransport,
-    contents: ContentsResource = new ContentsResource(transport),
+    contents: ContentsResource,
+    analyses: AnalysesResource,
   ) {
     this.#transport = transport;
     this.#contents = contents;
-    this.#submission = new ContentSubmissionRunner(transport, contents);
+    this.#analyses = analyses;
   }
 
   /**
-   * Submit Content that generates one Presentation without requiring a Display.
-   * Upload and confirmation behavior matches the high-level Push helpers.
+   * Upload Content and start a targetless Analysis for it. Equivalent to
+   * `contents.upload()` followed by `analyze({ target: { output } })`.
    */
   async generate(input: GeneratePresentationInput): Promise<PresentationGeneration> {
     if (!input || typeof input !== "object") {
@@ -179,6 +175,8 @@ export class PresentationsResource {
     }
     const output = input.output ?? {};
     validatePresentationOutputRequest(output);
+    const keyOption =
+      input.idempotencyKey === undefined ? {} : { idempotencyKey: input.idempotencyKey };
 
     if (input.mode === "hardcode") {
       validateAsset(input.image);
@@ -191,13 +189,17 @@ export class PresentationsResource {
           "Hardcode Presentation generation requires one PNG or JPEG image.",
         );
       }
-      return this.#submission.run(
-        "hardcode",
-        input,
-        null,
-        [input.image],
-        { output, operation: "Presentation generation" },
-      );
+      const uploaded = await this.#contents.upload({
+        title: input.title ?? null,
+        assets: [input.image],
+        ...keyOption,
+      });
+      const analysis = await this.#analyses.direct({
+        contentId: uploaded.content.id,
+        target: { output },
+        idempotencyKey: uploaded.idempotencyKey,
+      });
+      return toPushResult(uploaded.content, analysis, uploaded.idempotencyKey);
     }
 
     if (input.mode !== undefined && input.mode !== "auto") {
@@ -205,10 +207,25 @@ export class PresentationsResource {
         "Presentation generation mode must be auto or hardcode.",
       );
     }
-    return this.#submission.run("auto", input, null, input.assets, {
-      output,
-      operation: "Presentation generation",
+    if (!Array.isArray(input.assets) || input.assets.length === 0) {
+      throw new ConfigurationError(
+        "Presentation generation requires at least one Asset.",
+      );
+    }
+    const uploaded = await this.#contents.upload({
+      title: input.title ?? null,
+      assets: input.assets,
+      ...keyOption,
     });
+    const analysis = await this.#analyses.analyze({
+      contentIds: [uploaded.content.id],
+      context: input.context ?? "submitted",
+      intent: input.intent ?? null,
+      title: input.title ?? null,
+      target: { output },
+      idempotencyKey: uploaded.idempotencyKey,
+    });
+    return toPushResult(uploaded.content, analysis, uploaded.idempotencyKey);
   }
 
   async retrieve(
@@ -248,76 +265,28 @@ export class PresentationsResource {
   }
 
   /**
-   * Poll the Content returned by `generate` and resolve its one Presentation.
+   * Wait for the Analysis started by `generate` and return its one
+   * Presentation. Throws `NoChangeError` if the Analysis completed without
+   * producing one.
    */
   async waitUntilReady(
-    generationOrContentId: PresentationGeneration | string,
+    generationOrAnalysis: PresentationGeneration | Analysis | string,
     options: WaitUntilReadyOptions = {},
   ): Promise<Presentation> {
-    const contentId =
-      typeof generationOrContentId === "string"
-        ? encodePathSegment(generationOrContentId, "contentId")
-        : encodePathSegment(generationOrContentId.contentId, "contentId");
-    const pollIntervalMs = validateWaitNumber(
-      options.pollIntervalMs,
-      1_000,
-      100,
-      60_000,
-      "pollIntervalMs",
-    );
-    const timeoutMs = validateWaitNumber(
-      options.timeoutMs,
-      120_000,
-      1,
-      30 * 60_000,
-      "timeoutMs",
-    );
-    const startedAt = Date.now();
-    let content: Content | undefined =
-      typeof generationOrContentId === "string"
-        ? undefined
-        : generationOrContentId.content;
-
-    while (true) {
-      throwIfAborted(options.signal);
-      content =
-        content === undefined
-          ? await this.#contents.retrieve(contentId)
-          : content;
-
-      if (content.state === "failed") {
-        throw new PresentationGenerationError(
-          content.processing.error?.message ??
-            "Inklet could not generate the Presentation.",
-          {
-            contentId: content.id,
-            details: content.processing.error
-              ? {
-                  stage: content.processing.error.stage,
-                  retryable: content.processing.error.retryable,
-                  backendCode: content.processing.error.code,
-                }
-              : undefined,
-          },
-        );
-      }
-      if (content.state === "ready") {
-        if (content.presentationIds.length !== 1) {
-          throw new InvalidResponseError();
-        }
-        return this.retrieve(content.presentationIds[0] as string);
-      }
-
-      const elapsed = Date.now() - startedAt;
-      if (elapsed >= timeoutMs) {
-        throw new OperationTimeoutError(
-          `Presentation generation did not finish within ${timeoutMs} ms.`,
-          { details: { contentId: content.id, timeoutMs } },
-        );
-      }
-      await delay(Math.min(pollIntervalMs, timeoutMs - elapsed), options.signal);
-      content = undefined;
+    const analysisId =
+      typeof generationOrAnalysis === "string"
+        ? generationOrAnalysis
+        : "analysisId" in generationOrAnalysis
+          ? generationOrAnalysis.analysisId
+          : generationOrAnalysis.id;
+    const analysis = await this.#analyses.wait(analysisId, options);
+    if (analysis.outcome === "no_change" || analysis.presentationIds.length === 0) {
+      throw new NoChangeError(analysis.id, analysis.noChangeReason);
     }
+    if (analysis.presentationIds.length !== 1) {
+      throw new InvalidResponseError();
+    }
+    return this.retrieve(analysis.presentationIds[0] as string);
   }
 
   /** Create another PNG rendition from the persisted Scene without rerunning AI. */
@@ -339,7 +308,7 @@ export class PresentationsResource {
 export function parsePresentation(
   record: Record<string, unknown>,
 ): Presentation {
-  const mode = record.mode;
+  const mode = record.mode ?? "";
   if (
     typeof mode !== "string" ||
     (mode !== "" && mode !== "auto" && mode !== "manual" && mode !== "hardcode")
@@ -361,6 +330,7 @@ export function parsePresentation(
     id: expectString(record, "id"),
     kind: displayId === null ? "generated" : "display",
     displayId,
+    analysisId: nullableString(record.analysisId),
     contentIds: expectStringArray(record.contentIds),
     mode,
     state,
@@ -372,12 +342,6 @@ export function parsePresentation(
     createdAt: expectString(record, "createdAt"),
     updatedAt: expectString(record, "updatedAt"),
   };
-}
-
-export function parsePresentationProblem(
-  record: Record<string, unknown> | null,
-): PresentationProblem | null {
-  return parseProblem(record);
 }
 
 function parseRendition(record: Record<string, unknown>): PresentationRendition {
@@ -421,31 +385,6 @@ function parseImage(
   };
 }
 
-function parseProblem(
-  record: Record<string, unknown> | null,
-): PresentationProblem | null {
-  if (record === null) {
-    return null;
-  }
-  if (typeof record.retryable !== "boolean") {
-    throw new InvalidResponseError();
-  }
-  const assetIndex = record.assetIndex;
-  if (
-    assetIndex !== null &&
-    (typeof assetIndex !== "number" || !Number.isInteger(assetIndex))
-  ) {
-    throw new InvalidResponseError();
-  }
-  return {
-    code: expectString(record, "code"),
-    message: expectString(record, "message"),
-    stage: nullableString(record.stage),
-    retryable: record.retryable,
-    assetIndex,
-  };
-}
-
 function isPresentationState(value: unknown): value is PresentationState {
   return (
     typeof value === "string" &&
@@ -469,46 +408,4 @@ export function formatQuery(format: PresentationImageFormat | undefined): string
     throw new ConfigurationError("format must be png, raw2, or raw4.");
   }
   return `?format=${format}`;
-}
-
-function validateWaitNumber(
-  value: number | undefined,
-  fallback: number,
-  minimum: number,
-  maximum: number,
-  name: string,
-): number {
-  const resolved = value ?? fallback;
-  if (
-    !Number.isInteger(resolved) ||
-    resolved < minimum ||
-    resolved > maximum
-  ) {
-    throw new ConfigurationError(
-      `${name} must be an integer between ${minimum} and ${maximum}.`,
-    );
-  }
-  return resolved;
-}
-
-function throwIfAborted(signal: AbortSignal | undefined): void {
-  if (signal?.aborted) {
-    throw new OperationAbortedError("Presentation generation was aborted.");
-  }
-}
-
-function delay(milliseconds: number, signal: AbortSignal | undefined): Promise<void> {
-  throwIfAborted(signal);
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      signal?.removeEventListener("abort", onAbort);
-      resolve();
-    }, milliseconds);
-    const onAbort = () => {
-      clearTimeout(timer);
-      signal?.removeEventListener("abort", onAbort);
-      reject(new OperationAbortedError("Presentation generation was aborted."));
-    };
-    signal?.addEventListener("abort", onAbort, { once: true });
-  });
 }

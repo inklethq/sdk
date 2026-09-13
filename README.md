@@ -2,9 +2,9 @@
 
 Official server-side JavaScript and TypeScript SDK for Inklet.
 
-The v0.1 release supports PAT authentication, Display and Presentation reads,
-Content lifecycle operations, and high-level Auto, Manual, and Hardcode Push
-workflows.
+The SDK supports PAT authentication, Display and Presentation reads, Content
+upload, Analysis (with or without the user's earlier uploads as context), and
+one-call Auto, Manual, and Hardcode Push helpers.
 
 Targetless Presentation generation is available for software-only experiences:
 it produces versioned Scene JSON and PNG renditions without requiring a
@@ -77,34 +77,85 @@ if (current) {
 `displays.current()` is read-only and returns `null` when the Display has no
 confirmed Presentation.
 
+## Upload, then analyze
+
+Uploading and analyzing are separate steps. A Content is just the submitted
+Assets; nothing is processed until an Analysis references it.
+
+```ts
+// 1. Store Content. No AI runs, no quota is spent.
+const { content } = await inklet.contents.upload({
+  title: "Dentist",
+  assets: [inklet.assets.text("Dentist at 9am tomorrow")],
+});
+
+// 2. Analyze it. Inklet picks compatible Displays.
+const analysis = await inklet.analyze({
+  contentIds: [content.id],
+  intent: "Make a reminder card",
+});
+
+const done = await inklet.analyses.wait(analysis);
+if (done.outcome === "presentations") {
+  console.log(done.presentationIds);
+} else {
+  console.log("no change:", done.noChangeReason);
+}
+```
+
+`analyze()` options:
+
+| Option | Meaning |
+| --- | --- |
+| `contentIds` | Contents to analyze. Omit to analyze recent history only. |
+| `context` | `submitted` (default with `contentIds`): only those Contents. `history`: the agent may also read the user's earlier Contents. |
+| `scope` | `{ since: "72h" }` look-back window for `history`; the backend picks a default when omitted. |
+| `target` | Omit for agent-selected Displays, `{ displayId }` / `{ displayIds }` to pin, or `{ output }` for a software-only Scene/PNG. |
+| `intent`, `title` | Hints for the agent; `title` overrides the generated title. |
+
+```ts
+// Combine new Content with earlier uploads.
+await inklet.analyze({ contentIds: [content.id], context: "history", intent: "Merge into today's to-do" });
+
+// Nothing new: summarize the last three days.
+await inklet.analyze({ scope: { since: "72h" } });
+
+// Software-only output for a Widget.
+await inklet.analyze({ contentIds: [content.id], target: { output: { preset: "macos-widget-medium" } } });
+
+// One image straight to Displays, no AI.
+const { content: img } = await inklet.contents.upload({ assets: [inklet.assets.image({ data, filename: "a.png", contentType: "image/png" })] });
+await inklet.direct({ contentId: img.id, target: { displayIds: [displayId] } });
+```
+
+A `no_change` outcome is a normal completion: the agent decided nothing was
+worth showing. `analyses.wait()` throws `AnalysisFailedError` only when the
+Analysis itself failed.
+
+Scheduled analyses created by Inklet appear in
+`inklet.analyses.list({ trigger: "scheduled" })`.
+
 ## Generate a Presentation without a Display
 
-Use `presentations.generate()` when the result will be shown in software, a
-Widget, a website, or a device adapter owned by the caller. This path does not
-register a Display, publish a queue entry, or send MQTT.
+`presentations.generate()` is `contents.upload()` plus `analyze()` with an
+`output` target. It does not register a Display, publish a queue entry, or
+send MQTT.
 
 ```ts
 const generation = await inklet.presentations.generate({
-  idempotencyKey: "weekly-card-2026-08-29",
   intent: "Create a calm, glanceable summary",
-  assets: [
-    inklet.assets.text("Revenue increased 12% this week."),
-  ],
-  output: {
-    viewport: { width: 360, height: 170 },
-    formats: ["scene", "png"],
-  },
+  assets: [inklet.assets.text("Revenue increased 12% this week.")],
+  output: { viewport: { width: 360, height: 170 }, formats: ["scene", "png"] },
 });
 
 const presentation = await inklet.presentations.waitUntilReady(generation);
-
 console.log(presentation.scene?.data);
 console.log(presentation.renditions[0]?.url);
 ```
 
-The Scene uses the versioned
-`application/vnd.inklet.scene+json;version=1` media type. A stored Scene can be
-rendered at another size without rerunning AI:
+`waitUntilReady()` throws `NoChangeError` if the Analysis completed without a
+Presentation. A stored Scene can be rendered at another size without rerunning
+AI:
 
 ```ts
 const rendition = await inklet.presentations.render(presentation.id, {
@@ -116,94 +167,46 @@ const rendition = await inklet.presentations.render(presentation.id, {
 `default`, `macos-widget-small`, `macos-widget-medium`, and
 `macos-widget-large`.
 
-## Push
+## Push helpers
 
-Asset helpers validate supported content types and the 10 MiB per-binary-asset
-limit. Binary assets are uploaded directly to temporary storage URLs; the PAT
-is sent only to Inklet API endpoints.
-
-### Auto
-
-Auto Push lets Inklet choose compatible Displays.
+`inklet.push.*` are one-call wrappers over `contents.upload()` followed by
+`analyze()` or `direct()`. Binary assets are uploaded directly to temporary
+storage URLs; the PAT is sent only to Inklet API endpoints.
 
 ```ts
-const result = await inklet.push.auto({
-  idempotencyKey: "daily-brief-2026-08-12",
-  title: "Daily brief",
+// Auto: Inklet chooses compatible Displays.
+await inklet.push.auto({
   intent: "Make the key update easy to scan",
-  assets: [
-    inklet.assets.text("Revenue is up 12% week over week."),
-    inklet.assets.link("https://example.com/report"),
-  ],
+  context: "history",           // optional; default "submitted"
+  assets: [inklet.assets.text("Revenue is up 12% week over week.")],
 });
+
+// Manual: one Display, AI layout.
+await inklet.push.manual({ displayId, assets: [image, inklet.assets.text("This week's trend")] });
+
+// Hardcode: one PNG/JPEG, no AI, scaled server-side.
+await inklet.push.hardcode({ displayId, image });
 ```
 
-### Manual
-
-Manual Push targets one Display while allowing Inklet to process and lay out
-the supplied assets.
-
-```ts
-import { readFile } from "node:fs/promises";
-
-const image = inklet.assets.image({
-  data: await readFile("chart.png"),
-  filename: "chart.png",
-  contentType: "image/png",
-});
-
-const result = await inklet.push.manual({
-  displayId: "display_123",
-  assets: [image, inklet.assets.text("This week's trend")],
-});
-```
-
-### Hardcode
-
-Hardcode Push targets one Display and accepts exactly one PNG or JPEG. Inklet
-keeps the existing server behavior: it automatically scales the submitted
-image to the Display output size. The SDK intentionally does not require the
-source image dimensions to match the panel.
-
-```ts
-import { readFile } from "node:fs/promises";
-
-const result = await inklet.push.hardcode({
-  displayId: "display_123",
-  image: inklet.assets.image({
-    data: await readFile("poster.jpg"),
-    filename: "poster.jpg",
-    contentType: "image/jpeg",
-  }),
-});
-```
-
-All high-level Push methods return the Content, generated idempotency key, and
-known Presentation IDs. When `idempotencyKey` is omitted, the SDK generates
-one and returns it in the result. For caller-controlled retries, supply and
-reuse your own key.
-
-Push processing is asynchronous. A successful call commonly returns a
-`processing` Content with no Presentation IDs yet. Poll
-`inklet.contents.retrieve(result.contentId)` until the Content becomes `ready`
-or `failed`. A `ready` Content means its Presentation IDs are persisted; an
-individual Presentation may briefly remain `preparing` while the render worker
-finishes the PNG, RAW2, and RAW4 files.
+Each helper returns the Content, the Analysis, and the idempotency key it used
+for both. When `idempotencyKey` is omitted the SDK generates one; supply your
+own for caller-controlled retries.
 
 ## Content lifecycle
 
-The lower-level Content resource is available when an application needs to
-control individual lifecycle calls:
+A Content is `ready` once its Assets are in storage. Text and link Contents are
+`ready` immediately; Contents with binary Assets are `pending` until Inklet
+has verified the uploads, which happens on its own or when an Analysis first
+references the Content.
 
 ```ts
-const content = await inklet.contents.retrieve("content_123");
-const contents = await inklet.contents.list({ mode: "manual", state: "ready" });
-const confirmed = await inklet.contents.confirm(content.id);
+const { content } = await inklet.contents.upload({ assets });
+await inklet.contents.waitUntilReady(content);   // optional
+const stored = await inklet.contents.list({ state: "ready" });
 ```
 
-`contents.create()` and `contents.refreshUploadTickets()` are also public, but
-most applications should use `inklet.push.*`, which handles upload tickets,
-one ticket refresh/retry, and confirmation.
+`contents.create()` and `contents.refreshUploadTickets()` remain public for
+applications that manage uploads themselves.
 
 ## Errors
 

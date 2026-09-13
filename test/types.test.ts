@@ -1,7 +1,10 @@
 import {
   AuthenticationFailedError,
   Inklet,
+  NoChangeError,
   SubscriptionRequiredError,
+  type Analysis,
+  type AnalyzeInput,
   type AutoPushInput,
   type Content,
   type Display,
@@ -48,6 +51,26 @@ const generationInput = {
   },
 } satisfies GeneratePresentationInput;
 
+const analyzeInput = {
+  contentIds: ["content_123"],
+  context: "history",
+  scope: { since: "72h" },
+  target: { output: { preset: "macos-widget-medium" } },
+} satisfies AnalyzeInput;
+
+const analysisPromise: Promise<Analysis> = client.analyze(analyzeInput);
+const historyOnly: Promise<Analysis> = client.analyze({});
+const directPromise: Promise<Analysis> = client.direct({
+  contentId: "content_123",
+  target: { displayIds: ["display_123"] },
+});
+const uploadPromise = client.contents.upload({
+  title: "Note",
+  assets: [client.assets.text("Only stored, not analyzed")],
+});
+void uploadPromise.then((r) => client.contents.waitUntilReady(r.content));
+void analysisPromise.then((a) => client.analyses.wait(a));
+
 const displayPromise: Promise<Display> = client.displays.retrieve("display_123");
 const currentPromise: Promise<Presentation | null> =
   client.displays.current("display_123");
@@ -64,5 +87,8 @@ void client.presentations.render("presentation_123", {
 void displayPromise;
 void currentPromise;
 void contentPromise;
+void historyOnly;
+void directPromise;
 void AuthenticationFailedError;
 void SubscriptionRequiredError;
+void NoChangeError;

@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- Decouple upload from processing: `contents.upload()` stores Content without
+  running AI; `inklet.analyze()` / `inklet.direct()` start an Analysis over
+  `contentIds` and/or the user's history and produce Presentations.
+- Add `context: "submitted" | "history"`, `scope.since`, and `target`
+  (agent-selected, pinned Displays, or software-only `output`) to Analysis.
+- Add `analyses.wait()`, `analyses.list()`, `no_change` outcomes,
+  `AnalysisFailedError`, and `NoChangeError`.
+- Remove `contents.confirm()`; Content state is now `pending | ready | failed`
+  and only tracks Asset ingestion.
+- `push.*` and `presentations.generate()` are now wrappers over upload plus
+  Analysis and accept `context`.
+- Document the wire contract in `ANALYSIS_CONTRACT.md`.
 - Add `SubscriptionRequiredError` for plan-gated SDK operations.
 - Document that Auto and Manual Push require Pro while Hardcode remains
   available on Free.

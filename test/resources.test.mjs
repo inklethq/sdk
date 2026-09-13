@@ -1,16 +1,19 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+  AnalysisFailedError,
   AuthenticationFailedError,
   ConfigurationError,
   Inklet,
   MAX_ASSETS_PER_CONTENT,
+  NoChangeError,
 } from "../dist/esm/index.js";
 
 const PAT = "il_pat_test_abcdefghijklmnopqrstuvwxyz";
 const DISPLAY_ID = "01912345-6789-7abc-def0-123456789abc";
 const CONTENT_ID = "01922345-6789-7abc-def0-123456789abc";
 const PRESENTATION_ID = "01932345-6789-7abc-def0-123456789abc";
+const ANALYSIS_ID = "01952345-6789-7abc-def0-123456789abc";
 
 describe("SDK v1 resource reads", () => {
   it("reads Displays, queue, current Presentation, and Presentation details", async () => {
@@ -142,7 +145,6 @@ describe("SDK v1 asset and Content validation", () => {
     await assert.rejects(
       client.contents.create(
         {
-          mode: "auto",
           assets: Array.from(
             { length: MAX_ASSETS_PER_CONTENT + 1 },
             (_, index) => ({ type: "text", text: `Asset ${index}` }),
@@ -156,51 +158,40 @@ describe("SDK v1 asset and Content validation", () => {
   });
 });
 
-describe("SDK v1 Push workflow", () => {
-  it("creates and confirms a text-only Auto Push", async () => {
+describe("SDK v1 Content upload", () => {
+  it("creates a text-only Content without confirming or analyzing", async () => {
     const calls = [];
     const client = new Inklet({
       pat: PAT,
       fetch: async (input, init = {}) => {
         const url = new URL(input);
-        calls.push({ url, init });
-        if (url.pathname === "/api/sdk/v1/contents") {
-          assert.equal(init.method, "POST");
-          assert.equal(
-            new Headers(init.headers).get("idempotency-key"),
-            "auto-push-test-1",
-          );
-          assert.deepEqual(JSON.parse(init.body), {
-            mode: "auto",
-            displayId: null,
-            intent: null,
-            title: null,
-            assets: [{ type: "text", text: "Hello Inklet" }],
-          });
-          return json({
-            content: contentFixture({ state: "pending", stage: "awaiting_upload" }),
-            uploadTickets: [],
-          }, 201);
-        }
-        if (url.pathname === `/api/sdk/v1/contents/${CONTENT_ID}/confirm`) {
-          return json(contentFixture({ state: "processing", stage: "routing" }));
-        }
-        throw new Error(`Unexpected URL: ${url}`);
+        calls.push(url.pathname);
+        assert.equal(url.pathname, "/api/sdk/v1/contents");
+        assert.equal(init.method, "POST");
+        assert.equal(
+          new Headers(init.headers).get("idempotency-key"),
+          "upload-only-test-1",
+        );
+        assert.deepEqual(JSON.parse(init.body), {
+          title: "Dentist",
+          assets: [{ type: "text", text: "明早 9 点牙医" }],
+        });
+        return json({ content: contentFixture({ state: "ready" }), uploadTickets: [] }, 201);
       },
     });
 
-    const result = await client.push.auto({
-      idempotencyKey: "auto-push-test-1",
-      assets: [client.assets.text("Hello Inklet")],
+    const result = await client.contents.upload({
+      idempotencyKey: "upload-only-test-1",
+      title: "Dentist",
+      assets: [client.assets.text("明早 9 点牙医")],
     });
 
-    assert.equal(result.contentId, CONTENT_ID);
-    assert.equal(result.state, "processing");
-    assert.equal(result.idempotencyKey, "auto-push-test-1");
-    assert.equal(calls.length, 2);
+    assert.equal(result.content.id, CONTENT_ID);
+    assert.equal(result.content.state, "ready");
+    assert.deepEqual(calls, ["/api/sdk/v1/contents"]);
   });
 
-  it("uploads Manual Push assets without sending the PAT to storage", async () => {
+  it("uploads binary Assets without sending the PAT to storage", async () => {
     let storageFields;
     const client = new Inklet({
       pat: PAT,
@@ -213,36 +204,18 @@ describe("SDK v1 Push workflow", () => {
         }
         if (url.pathname === "/api/sdk/v1/contents") {
           const body = JSON.parse(init.body);
-          assert.equal(body.mode, "manual");
-          assert.equal(body.displayId, DISPLAY_ID);
+          assert.equal(body.mode, undefined);
+          assert.equal(body.assets[0].sizeBytes, 3);
           return json({
-            content: contentFixture({
-              mode: "manual",
-              displayId: DISPLAY_ID,
-              binary: true,
-            }),
+            content: contentFixture({ binary: true }),
             uploadTickets: [uploadTicket()],
           }, 201);
-        }
-        if (url.pathname.endsWith("/confirm")) {
-          return json(
-            contentFixture({
-              mode: "manual",
-              displayId: DISPLAY_ID,
-              state: "processing",
-              stage: "routing",
-              binary: true,
-              uploaded: true,
-            }),
-          );
         }
         throw new Error(`Unexpected URL: ${url}`);
       },
     });
 
-    const result = await client.push.manual({
-      displayId: DISPLAY_ID,
-      idempotencyKey: "manual-push-test-1",
+    const result = await client.contents.upload({
       assets: [
         client.assets.image({
           data: new Uint8Array([1, 2, 3]),
@@ -252,67 +225,12 @@ describe("SDK v1 Push workflow", () => {
       ],
     });
 
-    assert.equal(result.content.requestedDisplayId, DISPLAY_ID);
-    assert.deepEqual(
-      storageFields.slice(0, -1),
-      [["key", "sdk/test/photo.png"]],
-    );
+    assert.equal(result.content.state, "pending");
+    assert.deepEqual(storageFields.slice(0, -1), [["key", "sdk/test/photo.png"]]);
     assert.equal(storageFields.at(-1)[0], "file");
   });
 
-  it("keeps Hardcode scaling server-side and accepts arbitrary input dimensions", async () => {
-    let createBody;
-    const client = new Inklet({
-      pat: PAT,
-      fetch: async (input, init = {}) => {
-        const url = new URL(input);
-        if (url.origin === "https://uploads.example") {
-          return new Response(null, { status: 204 });
-        }
-        if (url.pathname === "/api/sdk/v1/contents") {
-          createBody = JSON.parse(init.body);
-          return json({
-            content: contentFixture({
-              mode: "hardcode",
-              displayId: DISPLAY_ID,
-              binary: true,
-            }),
-            uploadTickets: [uploadTicket()],
-          }, 201);
-        }
-        if (url.pathname.endsWith("/confirm")) {
-          return json(
-            contentFixture({
-              mode: "hardcode",
-              displayId: DISPLAY_ID,
-              state: "processing",
-              stage: "creating_presentations",
-              binary: true,
-              uploaded: true,
-            }),
-          );
-        }
-        throw new Error(`Unexpected URL: ${url}`);
-      },
-    });
-
-    // These are deliberately not valid PNG dimensions. The SDK only checks
-    // type/size and leaves the backend's LANCZOS 800×480 scaling in charge.
-    await client.push.hardcode({
-      displayId: DISPLAY_ID,
-      idempotencyKey: "hardcode-test-1",
-      image: client.assets.image({
-        data: new Uint8Array([137, 80, 78, 71]),
-        filename: "any-size.png",
-        contentType: "image/png",
-      }),
-    });
-
-    assert.equal(createBody.mode, "hardcode");
-    assert.equal(createBody.assets[0].sizeBytes, 4);
-  });
-
-  it("refreshes a failed upload ticket once before confirming", async () => {
+  it("refreshes a failed upload ticket once", async () => {
     let uploads = 0;
     let refreshes = 0;
     const client = new Inklet({
@@ -336,20 +254,11 @@ describe("SDK v1 Push workflow", () => {
             uploadTickets: [uploadTicket()],
           });
         }
-        if (url.pathname.endsWith("/confirm")) {
-          return json(contentFixture({
-            state: "processing",
-            stage: "routing",
-            binary: true,
-            uploaded: true,
-          }));
-        }
         throw new Error(`Unexpected URL: ${url}`);
       },
     });
 
-    await client.push.auto({
-      idempotencyKey: "upload-retry-test-1",
+    await client.contents.upload({
       assets: [client.assets.image({
         data: new Uint8Array([1]),
         filename: "retry.png",
@@ -360,40 +269,293 @@ describe("SDK v1 Push workflow", () => {
     assert.equal(uploads, 2);
     assert.equal(refreshes, 1);
   });
+
+  it("waits until the backend reports the Content ready", async () => {
+    let reads = 0;
+    const client = new Inklet({
+      pat: PAT,
+      fetch: async () => {
+        reads += 1;
+        return json(contentFixture({ binary: true, uploaded: reads > 1, state: reads > 1 ? "ready" : "pending" }));
+      },
+    });
+    const content = await client.contents.waitUntilReady(CONTENT_ID, {
+      pollIntervalMs: 100,
+      timeoutMs: 1_000,
+    });
+    assert.equal(content.state, "ready");
+    assert.equal(reads, 2);
+  });
+});
+
+describe("SDK v1 Analysis", () => {
+  it("analyzes uploaded Contents with submitted context by default", async () => {
+    let body;
+    const client = new Inklet({
+      pat: PAT,
+      fetch: async (input, init = {}) => {
+        const url = new URL(input);
+        assert.equal(url.pathname, "/api/sdk/v1/analyses");
+        assert.equal(init.method, "POST");
+        assert.equal(new Headers(init.headers).get("idempotency-key"), "analyze-test-1");
+        body = JSON.parse(init.body);
+        return json(analysisFixture({ state: "queued" }), 202);
+      },
+    });
+
+    const analysis = await client.analyze({
+      idempotencyKey: "analyze-test-1",
+      contentIds: [CONTENT_ID],
+      intent: "做成提醒卡",
+    });
+
+    assert.deepEqual(body, {
+      mode: "ai",
+      contentIds: [CONTENT_ID],
+      context: "submitted",
+      scope: null,
+      intent: "做成提醒卡",
+      title: null,
+      target: null,
+    });
+    assert.equal(analysis.state, "queued");
+    assert.equal(analysis.target, null);
+  });
+
+  it("defaults to history context when no Content is given", async () => {
+    let body;
+    const client = new Inklet({
+      pat: PAT,
+      fetch: async (_input, init = {}) => {
+        body = JSON.parse(init.body);
+        return json(analysisFixture({ context: "history", scope: { since: "72h" } }), 202);
+      },
+    });
+    await client.analyze({ scope: { since: "72h" } });
+    assert.equal(body.context, "history");
+    assert.deepEqual(body.contentIds, []);
+    assert.deepEqual(body.scope, { since: "72h" });
+  });
+
+  it("rejects submitted context without Content, and scope with submitted context", async () => {
+    let requested = false;
+    const client = new Inklet({
+      pat: PAT,
+      fetch: async () => {
+        requested = true;
+        return json({});
+      },
+    });
+    await assert.rejects(client.analyze({ context: "submitted" }), ConfigurationError);
+    await assert.rejects(
+      client.analyze({ contentIds: [CONTENT_ID], scope: { since: "24h" } }),
+      ConfigurationError,
+    );
+    await assert.rejects(
+      client.analyze({ contentIds: [CONTENT_ID], target: { displayId: DISPLAY_ID, output: {} } }),
+      ConfigurationError,
+    );
+    assert.equal(requested, false);
+  });
+
+  it("sends a targetless output target and parses the normalized profile back", async () => {
+    let body;
+    const client = new Inklet({
+      pat: PAT,
+      fetch: async (_input, init = {}) => {
+        body = JSON.parse(init.body);
+        return json(analysisFixture({ target: { output: outputFixture() } }), 202);
+      },
+    });
+    const analysis = await client.analyze({
+      contentIds: [CONTENT_ID],
+      target: { output: { preset: "macos-widget-medium" } },
+    });
+    assert.deepEqual(body.target, { output: { preset: "macos-widget-medium" } });
+    assert.equal(analysis.target.output.viewport.width, 360);
+  });
+
+  it("runs a direct Analysis for one image without AI", async () => {
+    let body;
+    const client = new Inklet({
+      pat: PAT,
+      fetch: async (_input, init = {}) => {
+        body = JSON.parse(init.body);
+        return json(analysisFixture({ mode: "direct", target: { displayIds: [DISPLAY_ID] } }), 202);
+      },
+    });
+    const analysis = await client.direct({
+      contentId: CONTENT_ID,
+      target: { displayIds: [DISPLAY_ID] },
+    });
+    assert.equal(body.mode, "direct");
+    assert.equal(body.context, "submitted");
+    assert.deepEqual(body.target, { displayIds: [DISPLAY_ID] });
+    assert.equal(analysis.mode, "direct");
+  });
+
+  it("waits for completion and surfaces no_change as a normal outcome", async () => {
+    let reads = 0;
+    const client = new Inklet({
+      pat: PAT,
+      fetch: async (input) => {
+        const url = new URL(input);
+        assert.equal(url.pathname, `/api/sdk/v1/analyses/${ANALYSIS_ID}`);
+        reads += 1;
+        return json(
+          reads === 1
+            ? analysisFixture({ state: "running" })
+            : analysisFixture({
+                state: "completed",
+                outcome: "no_change",
+                noChangeReason: "Nothing new worth showing in the last 72h.",
+              }),
+        );
+      },
+    });
+    const done = await client.analyses.wait(ANALYSIS_ID, {
+      pollIntervalMs: 100,
+      timeoutMs: 1_000,
+    });
+    assert.equal(done.outcome, "no_change");
+    assert.match(done.noChangeReason, /Nothing new/);
+    assert.equal(reads, 2);
+  });
+
+  it("throws AnalysisFailedError with the backend failure", async () => {
+    const client = new Inklet({
+      pat: PAT,
+      fetch: async () => json(analysisFixture({
+        state: "failed",
+        failure: {
+          code: "no_compatible_display",
+          message: "No compatible Display is available.",
+          stage: "routing",
+          retryable: false,
+          assetIndex: null,
+        },
+      })),
+    });
+    await assert.rejects(client.analyses.wait(ANALYSIS_ID), (error) => {
+      assert.ok(error instanceof AnalysisFailedError);
+      assert.equal(error.analysisId, ANALYSIS_ID);
+      assert.equal(error.details.backendCode, "no_compatible_display");
+      return true;
+    });
+  });
+
+  it("lists Analyses with filters", async () => {
+    const client = new Inklet({
+      pat: PAT,
+      fetch: async (input) => {
+        const url = new URL(input);
+        assert.equal(url.pathname, "/api/sdk/v1/analyses");
+        assert.equal(url.searchParams.get("trigger"), "scheduled");
+        assert.equal(url.searchParams.get("contentId"), CONTENT_ID);
+        return json({ items: [analysisFixture({ trigger: "scheduled" })], nextCursor: null, hasMore: false });
+      },
+    });
+    const page = await client.analyses.list({ trigger: "scheduled", contentId: CONTENT_ID });
+    assert.equal(page.items[0].trigger, "scheduled");
+  });
+});
+
+describe("SDK v1 Push helpers", () => {
+  it("auto Push uploads then analyzes with the same idempotency key", async () => {
+    const calls = [];
+    const client = new Inklet({
+      pat: PAT,
+      fetch: async (input, init = {}) => {
+        const url = new URL(input);
+        calls.push({
+          path: url.pathname,
+          key: new Headers(init.headers).get("idempotency-key"),
+          body: init.body ? JSON.parse(init.body) : null,
+        });
+        if (url.pathname === "/api/sdk/v1/contents") {
+          return json({ content: contentFixture({ state: "ready" }), uploadTickets: [] }, 201);
+        }
+        if (url.pathname === "/api/sdk/v1/analyses") {
+          return json(analysisFixture({ state: "queued" }), 202);
+        }
+        throw new Error(`Unexpected URL: ${url}`);
+      },
+    });
+
+    const result = await client.push.auto({
+      idempotencyKey: "auto-push-test-1",
+      context: "history",
+      assets: [client.assets.text("Hello Inklet")],
+    });
+
+    assert.equal(result.contentId, CONTENT_ID);
+    assert.equal(result.analysisId, ANALYSIS_ID);
+    assert.equal(result.state, "queued");
+    assert.deepEqual(calls.map((c) => c.path), ["/api/sdk/v1/contents", "/api/sdk/v1/analyses"]);
+    assert.deepEqual(calls.map((c) => c.key), ["auto-push-test-1", "auto-push-test-1"]);
+    assert.equal(calls[1].body.context, "history");
+    assert.equal(calls[1].body.target, null);
+  });
+
+  it("manual Push pins the Display; hardcode Push is a direct Analysis", async () => {
+    const analyses = [];
+    const client = new Inklet({
+      pat: PAT,
+      fetch: async (input, init = {}) => {
+        const url = new URL(input);
+        if (url.origin === "https://uploads.example") {
+          return new Response(null, { status: 204 });
+        }
+        if (url.pathname === "/api/sdk/v1/contents") {
+          return json({
+            content: contentFixture({ binary: true }),
+            uploadTickets: [uploadTicket()],
+          }, 201);
+        }
+        if (url.pathname === "/api/sdk/v1/analyses") {
+          analyses.push(JSON.parse(init.body));
+          return json(analysisFixture({ state: "queued" }), 202);
+        }
+        throw new Error(`Unexpected URL: ${url}`);
+      },
+    });
+
+    const image = () => client.assets.image({
+      data: new Uint8Array([137, 80, 78, 71]),
+      filename: "any-size.png",
+      contentType: "image/png",
+    });
+    await client.push.manual({ displayId: DISPLAY_ID, assets: [image()] });
+    await client.push.hardcode({ displayId: DISPLAY_ID, image: image() });
+
+    assert.deepEqual(analyses[0].target, { displayId: DISPLAY_ID });
+    assert.equal(analyses[0].mode, "ai");
+    assert.equal(analyses[1].mode, "direct");
+    assert.deepEqual(analyses[1].target, { displayId: DISPLAY_ID });
+  });
 });
 
 describe("SDK v1 targetless Presentation workflow", () => {
   it("generates Scene JSON and PNG without a registered Display", async () => {
-    let createBody;
-    let contentReads = 0;
+    let analysisBody;
+    let analysisReads = 0;
     const client = new Inklet({
       pat: PAT,
       fetch: async (input, init = {}) => {
         const url = new URL(input);
         if (url.pathname === "/api/sdk/v1/contents" && init.method === "POST") {
-          createBody = JSON.parse(init.body);
-          return json({
-            content: contentFixture({
-              state: "pending",
-              stage: "awaiting_upload",
-              output: outputFixture(),
-            }),
-            uploadTickets: [],
-          }, 201);
+          return json({ content: contentFixture({ state: "ready" }), uploadTickets: [] }, 201);
         }
-        if (url.pathname === `/api/sdk/v1/contents/${CONTENT_ID}/confirm`) {
-          return json(contentFixture({
-            state: "processing",
-            stage: "summarizing",
-            output: outputFixture(),
-          }));
+        if (url.pathname === "/api/sdk/v1/analyses" && init.method === "POST") {
+          analysisBody = JSON.parse(init.body);
+          return json(analysisFixture({ state: "queued", target: { output: outputFixture() } }), 202);
         }
-        if (url.pathname === `/api/sdk/v1/contents/${CONTENT_ID}`) {
-          contentReads += 1;
-          return json(contentFixture({
-            state: "ready",
-            stage: "complete",
-            output: outputFixture(),
+        if (url.pathname === `/api/sdk/v1/analyses/${ANALYSIS_ID}`) {
+          analysisReads += 1;
+          return json(analysisFixture({
+            state: "completed",
+            outcome: "presentations",
+            target: { output: outputFixture() },
             presentationIds: [PRESENTATION_ID],
           }));
         }
@@ -413,21 +575,35 @@ describe("SDK v1 targetless Presentation workflow", () => {
       },
     });
 
-    assert.equal(createBody.displayId, null);
-    assert.deepEqual(createBody.output, {
-      viewport: { width: 360, height: 170 },
-      formats: ["scene", "png"],
+    assert.deepEqual(analysisBody.target, {
+      output: { viewport: { width: 360, height: 170 }, formats: ["scene", "png"] },
     });
 
     const presentation = await client.presentations.waitUntilReady(generation, {
       pollIntervalMs: 100,
       timeoutMs: 1_000,
     });
-    assert.equal(contentReads, 1);
+    assert.equal(analysisReads, 1);
     assert.equal(presentation.kind, "generated");
     assert.equal(presentation.displayId, null);
+    assert.equal(presentation.analysisId, ANALYSIS_ID);
     assert.equal(presentation.scene.data.elements[0].properties.text, "A calm weekly summary");
     assert.equal(presentation.renditions[0].width, 360);
+  });
+
+  it("throws NoChangeError when generation completes without a Presentation", async () => {
+    const client = new Inklet({
+      pat: PAT,
+      fetch: async () => json(analysisFixture({
+        state: "completed",
+        outcome: "no_change",
+        noChangeReason: "Nothing to show.",
+      })),
+    });
+    await assert.rejects(
+      client.presentations.waitUntilReady(ANALYSIS_ID),
+      (error) => error instanceof NoChangeError && error.reason === "Nothing to show.",
+    );
   });
 
   it("renders another PNG from a stored Scene without rerunning AI", async () => {
@@ -545,6 +721,7 @@ function presentationFixture() {
   return {
     id: PRESENTATION_ID,
     displayId: DISPLAY_ID,
+    analysisId: ANALYSIS_ID,
     contentIds: [CONTENT_ID],
     mode: "auto",
     state: "confirmed",
@@ -575,6 +752,7 @@ function generatedPresentationFixture() {
   return {
     id: PRESENTATION_ID,
     displayId: null,
+    analysisId: ANALYSIS_ID,
     contentIds: [CONTENT_ID],
     mode: "auto",
     state: "ready",
@@ -616,23 +794,16 @@ function generatedPresentationFixture() {
 }
 
 function contentFixture({
-  mode = "auto",
-  displayId = null,
-  state = "pending",
-  stage = "awaiting_upload",
+  state,
   binary = false,
   uploaded = false,
-  output,
+  analysisIds = [],
   presentationIds = [],
 } = {}) {
   return {
     id: CONTENT_ID,
-    mode,
-    requestedDisplayId: displayId,
-    intent: null,
     title: null,
-    ...(output === undefined ? {} : { output }),
-    state,
+    state: state ?? (binary && !uploaded ? "pending" : "ready"),
     assets: binary
       ? [{
           assetIndex: 0,
@@ -654,14 +825,44 @@ function contentFixture({
           sizeBytes: null,
           uploadState: "uploaded",
         }],
-    upload: {
-      status: binary && !uploaded ? "awaiting_upload" : "complete",
-      failedAssetIndexes: [],
-    },
-    processing: { stage, warnings: [], error: null },
+    failedAssetIndexes: [],
+    analysisIds,
     presentationIds,
+    failure: null,
     createdAt: "2026-08-12T10:00:00Z",
     updatedAt: "2026-08-12T10:00:01Z",
+  };
+}
+
+function analysisFixture({
+  mode = "ai",
+  trigger = "api",
+  state = "completed",
+  outcome = state === "completed" ? "presentations" : null,
+  noChangeReason = null,
+  context = "submitted",
+  scope = null,
+  target = null,
+  presentationIds = outcome === "presentations" ? [PRESENTATION_ID] : [],
+  failure = null,
+} = {}) {
+  return {
+    id: ANALYSIS_ID,
+    mode,
+    trigger,
+    state,
+    outcome,
+    noChangeReason,
+    contentIds: context === "history" && scope ? [] : [CONTENT_ID],
+    context,
+    scope,
+    intent: null,
+    title: null,
+    target,
+    presentationIds,
+    failure,
+    createdAt: "2026-08-12T10:00:02Z",
+    updatedAt: "2026-08-12T10:00:20Z",
   };
 }
 

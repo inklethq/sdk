@@ -15,6 +15,12 @@ import {
   RevokedSecretKeyError,
   SubscriptionRequiredError,
 } from "./errors.js";
+import {
+  AnalysesResource,
+  type Analysis,
+  type AnalyzeInput,
+  type DirectInput,
+} from "./analyses.js";
 import { AssetsResource } from "./assets.js";
 import { ContentsResource } from "./contents.js";
 import { DisplaysResource } from "./displays.js";
@@ -76,6 +82,7 @@ export class InkletClient {
   readonly baseUrl: string;
   readonly assets: AssetsResource;
   readonly contents: ContentsResource;
+  readonly analyses: AnalysesResource;
   readonly displays: DisplaysResource;
   readonly presentations: PresentationsResource;
   readonly push: PushResource;
@@ -102,9 +109,27 @@ export class InkletClient {
     };
     this.assets = new AssetsResource();
     this.contents = new ContentsResource(transport);
-    this.presentations = new PresentationsResource(transport, this.contents);
+    this.analyses = new AnalysesResource(transport);
+    this.presentations = new PresentationsResource(
+      transport,
+      this.contents,
+      this.analyses,
+    );
     this.displays = new DisplaysResource(transport);
-    this.push = new PushResource(transport, this.contents);
+    this.push = new PushResource(this.contents, this.analyses);
+  }
+
+  /**
+   * Run the agent over uploaded Contents and/or the user's history.
+   * Shorthand for `analyses.analyze()`.
+   */
+  analyze(input: AnalyzeInput = {}): Promise<Analysis> {
+    return this.analyses.analyze(input);
+  }
+
+  /** Show one uploaded image without AI. Shorthand for `analyses.direct()`. */
+  direct(input: DirectInput): Promise<Analysis> {
+    return this.analyses.direct(input);
   }
 
   async request<T = unknown>(

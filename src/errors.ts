@@ -214,18 +214,39 @@ export class OperationAbortedError extends InkletError {
   }
 }
 
-export class PresentationGenerationError extends InkletError {
-  readonly contentId: string;
+export class AnalysisFailedError extends InkletError {
+  readonly analysisId: string;
 
   constructor(
     message: string,
-    options: Omit<InkletErrorOptions, "code"> & { contentId: string },
+    options: Omit<InkletErrorOptions, "code"> & { analysisId: string },
   ) {
     super(message, {
       ...options,
-      code: "presentation_generation_failed",
-      details: { ...options.details, contentId: options.contentId },
+      code: "analysis_failed",
+      details: { ...options.details, analysisId: options.analysisId },
     });
-    this.contentId = options.contentId;
+    this.analysisId = options.analysisId;
+  }
+}
+
+/**
+ * An Analysis completed but produced no Presentation. This is a normal
+ * outcome for history-driven analyses; it is an error only for callers that
+ * required exactly one Presentation, such as `presentations.waitUntilReady`.
+ */
+export class NoChangeError extends InkletError {
+  readonly analysisId: string;
+  readonly reason: string | null;
+
+  constructor(analysisId: string, reason: string | null) {
+    super(
+      reason
+        ? `The Analysis completed without a Presentation: ${reason}`
+        : "The Analysis completed without producing a Presentation.",
+      { code: "analysis_no_change", details: { analysisId, reason } },
+    );
+    this.analysisId = analysisId;
+    this.reason = reason;
   }
 }

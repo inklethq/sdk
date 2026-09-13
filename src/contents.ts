@@ -4,17 +4,15 @@ import {
   ALLOWED_IMAGE_CONTENT_TYPES,
   MAX_ASSETS_PER_CONTENT,
   MAX_ASSET_SIZE_BYTES,
+  assetBlob,
+  validateAsset,
   type AllowedFileContentType,
   type AllowedImageContentType,
+  type FileAsset,
+  type ImageAsset,
   type InkletAsset,
 } from "./assets.js";
-import type { PresentationProblem } from "./presentations.js";
-import {
-  parsePresentationOutput,
-  validatePresentationOutputRequest,
-  type PresentationOutput,
-  type PresentationOutputRequest,
-} from "./scene.js";
+import { AssetUploadError, OperationAbortedError, OperationTimeoutError } from "./errors.js";
 import {
   SDK_API_PREFIX,
   appendCursorAndLimit,
@@ -25,23 +23,19 @@ import {
   expectString,
   expectStringArray,
   isRecord,
+  nullableRecord,
   nullableString,
   parsePage,
   type ResourceTransport,
 } from "./resource.js";
+import type { PresentationProblem } from "./presentations.js";
 
-export type ContentMode = "auto" | "manual" | "hardcode";
-export type ContentState = "pending" | "processing" | "ready" | "failed";
-export type ContentUploadStatus = "awaiting_upload" | "partial" | "complete";
+/**
+ * A Content only tracks whether its Assets have arrived. Processing is a
+ * separate Analysis (see `analyses.ts`), so there is no processing state here.
+ */
+export type ContentState = "pending" | "ready" | "failed";
 export type ContentAssetUploadState = "pending" | "uploaded" | "failed";
-export type ContentProcessingStage =
-  | "awaiting_upload"
-  | "fetching_links"
-  | "summarizing"
-  | "routing"
-  | "creating_presentations"
-  | "complete"
-  | "failed";
 
 export interface ContentAsset {
   assetIndex: number;
@@ -54,30 +48,17 @@ export interface ContentAsset {
   uploadState: ContentAssetUploadState;
 }
 
-export interface ContentUpload {
-  status: ContentUploadStatus;
-  failedAssetIndexes: readonly number[];
-}
-
-export interface ContentProcessing {
-  stage: ContentProcessingStage | null;
-  warnings: readonly PresentationProblem[];
-  error: PresentationProblem | null;
-}
-
 export interface Content {
   id: string;
-  mode: ContentMode;
-  requestedDisplayId: string | null;
-  intent: string | null;
   title: string | null;
-  /** Non-null when this Content generates one targetless Presentation. */
-  output: PresentationOutput | null;
   state: ContentState;
   assets: readonly ContentAsset[];
-  upload: ContentUpload;
-  processing: ContentProcessing;
+  failedAssetIndexes: readonly number[];
+  /** Every Analysis that referenced this Content, oldest first. */
+  analysisIds: readonly string[];
+  /** Union of Presentations produced by those Analyses, oldest first. */
   presentationIds: readonly string[];
+  failure: PresentationProblem | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -90,7 +71,6 @@ export interface ContentPage {
 
 export interface ListContentsOptions {
   state?: ContentState;
-  mode?: ContentMode;
   cursor?: string;
   limit?: number;
 }
@@ -137,18 +117,37 @@ export type CreateContentAssetInput =
   | ContentImageInput
   | ContentFileInput;
 
+/** Low-level create request: Asset metadata only, binaries are uploaded after. */
 export interface CreateContentRequest {
-  mode: ContentMode;
-  displayId?: string | null;
-  intent?: string | null;
   title?: string | null;
-  /**
-   * Generate a Presentation without delivering it to a Display.
-   *
-   * Omit this field to preserve the v0.1 Display Push behavior.
-   */
-  output?: PresentationOutputRequest;
   assets: readonly CreateContentAssetInput[];
+}
+
+/** High-level upload input: Assets with their binary data. */
+export interface UploadContentInput {
+  title?: string | null;
+  assets: readonly InkletAsset[];
+  /** Generated when omitted; returned on the result for caller-controlled retries. */
+  idempotencyKey?: string;
+}
+
+export interface UploadContentResult {
+  content: Content;
+  idempotencyKey: string;
+}
+
+export interface WaitUntilContentReadyOptions {
+  /** Defaults to 1,000 ms. */
+  pollIntervalMs?: number;
+  /** Defaults to 60,000 ms. */
+  timeoutMs?: number;
+  signal?: AbortSignal;
+}
+
+interface PreparedBinary {
+  asset: ImageAsset | FileAsset;
+  assetIndex: number;
+  blob: Blob;
 }
 
 export class ContentsResource {
@@ -156,6 +155,39 @@ export class ContentsResource {
 
   constructor(transport: ResourceTransport) {
     this.#transport = transport;
+  }
+
+  /**
+   * Create a Content, upload its binary Assets directly to storage, and return
+   * the Content. Nothing is analyzed until `inklet.analyze()` references it.
+   *
+   * A Content with binary Assets is reported as `pending` until the backend
+   * has verified the uploads (storage events, or lazily when an Analysis first
+   * references it). Text and link Contents are `ready` immediately.
+   */
+  async upload(input: UploadContentInput): Promise<UploadContentResult> {
+    if (!input || typeof input !== "object" || !Array.isArray(input.assets)) {
+      throw new ConfigurationError("Content upload requires an assets array.");
+    }
+    const prepared = prepareAssets(input.assets);
+    const idempotencyKey = input.idempotencyKey ?? createIdempotencyKey();
+    const created = await this.create(
+      { title: input.title ?? null, assets: prepared.request },
+      idempotencyKey,
+    );
+
+    validateTickets(created.uploadTickets, prepared.binary);
+    const failed = await uploadTickets(
+      this.#transport,
+      created.content.id,
+      created.uploadTickets,
+      prepared.binary,
+    );
+    if (failed.length > 0) {
+      await this.#refreshAndUpload(created.content.id, failed, prepared.binary);
+    }
+
+    return { content: created.content, idempotencyKey };
   }
 
   async create(
@@ -167,7 +199,7 @@ export class ContentsResource {
     const response = await this.#transport.request(`${SDK_API_PREFIX}/contents`, {
       method: "POST",
       headers: { "idempotency-key": idempotencyKey },
-      json: input,
+      json: { title: input.title ?? null, assets: input.assets },
     });
     return parseCreateContentResponse(response);
   }
@@ -184,31 +216,14 @@ export class ContentsResource {
     const query = new URLSearchParams();
     appendCursorAndLimit(query, options);
     if (options.state !== undefined) {
-      validateEnumOption(
-        options.state,
-        ["pending", "processing", "ready", "failed"],
-        "state",
-      );
+      validateEnumOption(options.state, ["pending", "ready", "failed"], "state");
       query.set("state", options.state);
-    }
-    if (options.mode !== undefined) {
-      validateEnumOption(options.mode, ["auto", "manual", "hardcode"], "mode");
-      query.set("mode", options.mode);
     }
     const suffix = query.size === 0 ? "" : `?${query.toString()}`;
     const response = await this.#transport.request(
       `${SDK_API_PREFIX}/contents${suffix}`,
     );
     return parsePage(response, parseContent);
-  }
-
-  async confirm(contentId: string): Promise<Content> {
-    const id = encodePathSegment(contentId, "contentId");
-    const response = await this.#transport.request(
-      `${SDK_API_PREFIX}/contents/${id}/confirm`,
-      { method: "POST" },
-    );
-    return parseContent(expectRecord(response));
   }
 
   async refreshUploadTickets(
@@ -233,53 +248,75 @@ export class ContentsResource {
     );
     return parseCreateContentResponse(response);
   }
+
+  /**
+   * Poll until the backend reports the Content `ready` or `failed`. Only
+   * needed when a caller wants to observe ingestion without analyzing;
+   * `inklet.analyze()` verifies pending uploads on its own.
+   */
+  async waitUntilReady(
+    contentOrId: Content | string,
+    options: WaitUntilContentReadyOptions = {},
+  ): Promise<Content> {
+    const contentId = typeof contentOrId === "string" ? contentOrId : contentOrId.id;
+    const pollIntervalMs = validateWaitNumber(options.pollIntervalMs, 1_000, 100, 60_000, "pollIntervalMs");
+    const timeoutMs = validateWaitNumber(options.timeoutMs, 60_000, 1, 30 * 60_000, "timeoutMs");
+    const startedAt = Date.now();
+    let content = typeof contentOrId === "string" ? undefined : contentOrId;
+
+    while (true) {
+      throwIfAborted(options.signal, "Waiting for the Content was aborted.");
+      content = content ?? (await this.retrieve(contentId));
+      if (content.state === "ready" || content.state === "failed") {
+        return content;
+      }
+      const elapsed = Date.now() - startedAt;
+      if (elapsed >= timeoutMs) {
+        throw new OperationTimeoutError(
+          `Content ${content.id} did not become ready within ${timeoutMs} ms.`,
+          { details: { contentId: content.id, timeoutMs } },
+        );
+      }
+      await delay(Math.min(pollIntervalMs, timeoutMs - elapsed), options.signal);
+      content = undefined;
+    }
+  }
+
+  async #refreshAndUpload(
+    contentId: string,
+    assetIndexes: readonly number[],
+    binary: readonly PreparedBinary[],
+  ): Promise<void> {
+    const refreshed = await this.refreshUploadTickets(contentId, assetIndexes);
+    validateTickets(refreshed.uploadTickets, binary, assetIndexes);
+    const failed = await uploadTickets(
+      this.#transport,
+      contentId,
+      refreshed.uploadTickets,
+      binary,
+    );
+    if (failed.length > 0) {
+      throw new AssetUploadError(
+        "One or more Inklet assets could not be uploaded after refreshing their upload tickets.",
+        { contentId, failedAssetIndexes: failed },
+      );
+    }
+  }
 }
 
 function validateCreateContentRequest(input: CreateContentRequest): void {
   if (!input || typeof input !== "object") {
     throw new ConfigurationError("Content creation requires an input object.");
   }
-  validateEnumOption(input.mode, ["auto", "manual", "hardcode"], "mode");
-
-  if (input.output !== undefined) {
-    validatePresentationOutputRequest(input.output);
-    if (input.mode === "manual") {
-      throw new ConfigurationError(
-        "Targetless Presentation generation supports auto or hardcode mode, not manual.",
-      );
-    }
-    if (input.displayId !== undefined && input.displayId !== null) {
-      throw new ConfigurationError(
-        "Targetless Presentation Content must omit displayId.",
-      );
-    }
-  } else if (input.mode === "auto") {
-    if (input.displayId !== undefined && input.displayId !== null) {
-      throw new ConfigurationError("Auto Content must omit displayId.");
-    }
-  } else if (
-    typeof input.displayId !== "string" ||
-    input.displayId.trim().length === 0
-  ) {
-    throw new ConfigurationError(
-      `${input.mode === "manual" ? "Manual" : "Hardcode"} Content requires displayId.`,
-    );
+  if (input.title !== undefined && input.title !== null && typeof input.title !== "string") {
+    throw new ConfigurationError("title must be a string or null.");
   }
-
-  validateOptionalString(input.intent, "intent");
-  validateOptionalString(input.title, "title");
-
   if (!Array.isArray(input.assets) || input.assets.length === 0) {
     throw new ConfigurationError("Content requires at least one Asset.");
   }
   if (input.assets.length > MAX_ASSETS_PER_CONTENT) {
     throw new ConfigurationError(
       `Content cannot contain more than ${MAX_ASSETS_PER_CONTENT} Assets.`,
-    );
-  }
-  if (input.mode === "hardcode" && input.assets.length !== 1) {
-    throw new ConfigurationError(
-      "Hardcode Content requires exactly one PNG or JPEG image.",
     );
   }
 
@@ -289,57 +326,25 @@ function validateCreateContentRequest(input: CreateContentRequest): void {
     }
     switch (asset.type) {
       case "text":
-        if (
-          input.mode === "hardcode" ||
-          typeof asset.text !== "string" ||
-          asset.text.trim().length === 0
-        ) {
+        if (typeof asset.text !== "string" || asset.text.trim().length === 0) {
           throw new ConfigurationError(
             `Asset ${assetIndex} must contain non-whitespace text.`,
           );
         }
         return;
       case "link":
-        if (input.mode === "hardcode") {
-          throw new ConfigurationError(
-            "Hardcode Content requires exactly one PNG or JPEG image.",
-          );
-        }
         validateContentLink(asset.url, assetIndex);
         return;
       case "image":
         validateBinaryInput(asset, assetIndex, ALLOWED_IMAGE_CONTENT_TYPES);
-        if (
-          input.mode === "hardcode" &&
-          asset.contentType !== "image/png" &&
-          asset.contentType !== "image/jpeg"
-        ) {
-          throw new ConfigurationError(
-            "Hardcode Content requires exactly one PNG or JPEG image.",
-          );
-        }
         return;
       case "file":
-        if (input.mode === "hardcode") {
-          throw new ConfigurationError(
-            "Hardcode Content requires exactly one PNG or JPEG image.",
-          );
-        }
         validateBinaryInput(asset, assetIndex, ALLOWED_FILE_CONTENT_TYPES);
         return;
       default:
         throw new ConfigurationError(`Asset ${assetIndex} has an unsupported type.`);
     }
   });
-}
-
-function validateOptionalString(
-  value: string | null | undefined,
-  name: "intent" | "title",
-): void {
-  if (value !== undefined && value !== null && typeof value !== "string") {
-    throw new ConfigurationError(`${name} must be a string or null.`);
-  }
 }
 
 function validateContentLink(value: string, assetIndex: number): void {
@@ -390,7 +395,7 @@ function validateBinaryInput(
   }
 }
 
-function validateEnumOption(
+export function validateEnumOption(
   value: unknown,
   allowed: readonly string[],
   name: string,
@@ -409,43 +414,15 @@ export function parseCreateContentResponse(value: unknown): CreateContentRespons
 }
 
 export function parseContent(record: Record<string, unknown>): Content {
-  const mode = expectEnum(record.mode, ["auto", "manual", "hardcode"] as const);
-  const state = expectEnum(
-    record.state,
-    ["pending", "processing", "ready", "failed"] as const,
-  );
-  const upload = expectRecord(record.upload);
-  const processing = expectRecord(record.processing);
-  const stage = processing.stage;
-  if (stage !== null && !isProcessingStage(stage)) {
-    throw new InvalidResponseError();
-  }
-
   return {
     id: expectString(record, "id"),
-    mode,
-    requestedDisplayId: nullableString(record.requestedDisplayId),
-    intent: nullableString(record.intent),
     title: nullableString(record.title),
-    output: parsePresentationOutput(record.output),
-    state,
+    state: expectEnum(record.state, ["pending", "ready", "failed"] as const),
     assets: expectRecordArray(record.assets).map(parseAsset),
-    upload: {
-      status: expectEnum(
-        upload.status,
-        ["awaiting_upload", "partial", "complete"] as const,
-      ),
-      failedAssetIndexes: parseIntegerArray(upload.failedAssetIndexes),
-    },
-    processing: {
-      stage,
-      warnings: expectRecordArray(processing.warnings).map(parseProblem),
-      error:
-        processing.error === null
-          ? null
-          : parseProblem(expectRecord(processing.error)),
-    },
-    presentationIds: expectStringArray(record.presentationIds),
+    failedAssetIndexes: parseIntegerArray(record.failedAssetIndexes ?? []),
+    analysisIds: expectStringArray(record.analysisIds ?? []),
+    presentationIds: expectStringArray(record.presentationIds ?? []),
+    failure: parseProblem(nullableRecord(record.failure ?? null)),
     createdAt: expectString(record, "createdAt"),
     updatedAt: expectString(record, "updatedAt"),
   };
@@ -497,9 +474,14 @@ function parseUploadTicket(record: Record<string, unknown>): UploadTicket {
   };
 }
 
-function parseProblem(record: Record<string, unknown>): PresentationProblem {
-  const stage = record.stage;
-  const assetIndex = record.assetIndex;
+export function parseProblem(
+  record: Record<string, unknown> | null,
+): PresentationProblem | null {
+  if (record === null) {
+    return null;
+  }
+  const stage = record.stage ?? null;
+  const assetIndex = record.assetIndex ?? null;
   if (
     (stage !== null && typeof stage !== "string") ||
     typeof record.retryable !== "boolean" ||
@@ -527,7 +509,7 @@ function parseIntegerArray(value: unknown): number[] {
   return [...value] as number[];
 }
 
-function expectEnum<const T extends readonly string[]>(
+export function expectEnum<const T extends readonly string[]>(
   value: unknown,
   allowed: T,
 ): T[number] {
@@ -537,22 +519,7 @@ function expectEnum<const T extends readonly string[]>(
   return value as T[number];
 }
 
-function isProcessingStage(value: unknown): value is ContentProcessingStage {
-  return (
-    typeof value === "string" &&
-    [
-      "awaiting_upload",
-      "fetching_links",
-      "summarizing",
-      "routing",
-      "creating_presentations",
-      "complete",
-      "failed",
-    ].includes(value)
-  );
-}
-
-function validateIdempotencyKey(value: string): void {
+export function validateIdempotencyKey(value: string): void {
   if (
     typeof value !== "string" ||
     value.length < 8 ||
@@ -563,4 +530,142 @@ function validateIdempotencyKey(value: string): void {
       "idempotencyKey must contain 8-128 printable ASCII characters without spaces.",
     );
   }
+}
+
+export function createIdempotencyKey(): string {
+  const randomUUID = globalThis.crypto?.randomUUID;
+  if (typeof randomUUID === "function") {
+    return `sdk-${randomUUID.call(globalThis.crypto)}`;
+  }
+  return `sdk-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
+function prepareAssets(assets: readonly InkletAsset[]): {
+  request: CreateContentAssetInput[];
+  binary: PreparedBinary[];
+} {
+  const request: CreateContentAssetInput[] = [];
+  const binary: PreparedBinary[] = [];
+
+  assets.forEach((asset, assetIndex) => {
+    validateAsset(asset);
+    switch (asset.type) {
+      case "text":
+        request.push({ type: "text", text: asset.text });
+        break;
+      case "link":
+        request.push({ type: "link", url: asset.url });
+        break;
+      case "image":
+      case "file": {
+        const blob = assetBlob(asset);
+        request.push({
+          type: asset.type,
+          filename: asset.filename,
+          contentType: asset.contentType,
+          sizeBytes: blob.size,
+        } as ContentImageInput | ContentFileInput);
+        binary.push({ asset, assetIndex, blob });
+        break;
+      }
+    }
+  });
+
+  return { request, binary };
+}
+
+async function uploadTickets(
+  transport: ResourceTransport,
+  contentId: string,
+  tickets: readonly UploadTicket[],
+  binary: readonly PreparedBinary[],
+): Promise<number[]> {
+  const byIndex = new Map(binary.map((entry) => [entry.assetIndex, entry]));
+  const results = await Promise.allSettled(
+    tickets.map(async (ticket) => {
+      const entry = byIndex.get(ticket.assetIndex);
+      if (entry === undefined) {
+        throw new InvalidResponseError();
+      }
+      await transport.upload({
+        url: ticket.url,
+        fields: ticket.fields,
+        blob: entry.blob,
+        filename: entry.asset.filename,
+        contentType: entry.asset.contentType,
+        assetIndex: entry.assetIndex,
+        contentId,
+      });
+      return ticket.assetIndex;
+    }),
+  );
+
+  const failed: number[] = [];
+  results.forEach((result, index) => {
+    if (result.status === "rejected") {
+      failed.push(tickets[index]?.assetIndex ?? index);
+    }
+  });
+  return [...new Set(failed)].sort((a, b) => a - b);
+}
+
+function validateTickets(
+  tickets: readonly UploadTicket[],
+  binary: readonly PreparedBinary[],
+  expectedIndexes: readonly number[] = binary.map((entry) => entry.assetIndex),
+): void {
+  const actual = tickets.map((ticket) => ticket.assetIndex);
+  if (
+    new Set(actual).size !== actual.length ||
+    actual.length !== expectedIndexes.length ||
+    !expectedIndexes.every((index) => actual.includes(index))
+  ) {
+    throw new InvalidResponseError();
+  }
+}
+
+export function validateWaitNumber(
+  value: number | undefined,
+  fallback: number,
+  minimum: number,
+  maximum: number,
+  name: string,
+): number {
+  const resolved = value ?? fallback;
+  if (
+    !Number.isInteger(resolved) ||
+    resolved < minimum ||
+    resolved > maximum
+  ) {
+    throw new ConfigurationError(
+      `${name} must be an integer between ${minimum} and ${maximum}.`,
+    );
+  }
+  return resolved;
+}
+
+export function throwIfAborted(signal: AbortSignal | undefined, message: string): void {
+  if (signal?.aborted) {
+    throw new OperationAbortedError(message);
+  }
+}
+
+export function delay(
+  milliseconds: number,
+  signal: AbortSignal | undefined,
+  message = "The wait was aborted.",
+): Promise<void> {
+  throwIfAborted(signal, message);
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, milliseconds);
+    const onAbort = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      reject(new OperationAbortedError(message));
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
 }
