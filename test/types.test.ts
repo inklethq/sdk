@@ -1,9 +1,11 @@
 import {
   AuthenticationFailedError,
   Inklet,
+  SubscriptionRequiredError,
   type AutoPushInput,
   type Content,
   type Display,
+  type GeneratePresentationInput,
   type HardcodePushInput,
   type InkletClientOptions,
   type InkletRequestOptions,
@@ -38,6 +40,14 @@ const hardcodeInput = {
   }),
 } satisfies HardcodePushInput;
 
+const generationInput = {
+  assets: [client.assets.text("Hello from a software-only Presentation")],
+  output: {
+    viewport: { width: 360, height: 170 },
+    formats: ["scene", "png"],
+  },
+} satisfies GeneratePresentationInput;
+
 const displayPromise: Promise<Display> = client.displays.retrieve("display_123");
 const currentPromise: Promise<Presentation | null> =
   client.displays.current("display_123");
@@ -46,7 +56,13 @@ const contentPromise: Promise<Content> = client.contents.retrieve("content_123")
 void client.push.auto(autoInput);
 void client.push.hardcode(hardcodeInput);
 void client.presentations.retrieve("presentation_123", { format: "raw2" });
+const generation = client.presentations.generate(generationInput);
+void generation.then((value) => client.presentations.waitUntilReady(value));
+void client.presentations.render("presentation_123", {
+  preset: "macos-widget-medium",
+});
 void displayPromise;
 void currentPromise;
 void contentPromise;
 void AuthenticationFailedError;
+void SubscriptionRequiredError;

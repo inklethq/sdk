@@ -10,6 +10,7 @@ import {
   NetworkError,
   PermissionDeniedError,
   RevokedSecretKeyError,
+  SubscriptionRequiredError,
 } from "../dist/esm/index.js";
 
 const SECRET = "inklet_pat_test_123456789";
@@ -217,6 +218,39 @@ describe("Inklet error classification", () => {
       assert.ok(error instanceof PermissionDeniedError);
       assert.equal(error.requestId, "req_forbidden");
       assert.equal(error.status, 403);
+      return true;
+    });
+  });
+
+  it("classifies subscription-gated features separately", async () => {
+    const client = clientReturning(
+      403,
+      {
+        error: {
+          code: "subscription_required",
+          message: "Auto Push requires an active Pro subscription.",
+          requestId: "req_subscription",
+          details: {
+            currentPlan: "free",
+            requiredPlan: "pro",
+            feature: "push.auto",
+          },
+        },
+      },
+      { "x-request-id": "req_subscription" },
+    );
+
+    await assert.rejects(client.request("/api/sdk/v1/contents"), (error) => {
+      assert.ok(error instanceof SubscriptionRequiredError);
+      assert.ok(error instanceof PermissionDeniedError);
+      assert.equal(error.code, "subscription_required");
+      assert.equal(error.status, 403);
+      assert.equal(error.requestId, "req_subscription");
+      assert.deepEqual(error.details, {
+        currentPlan: "free",
+        requiredPlan: "pro",
+        feature: "push.auto",
+      });
       return true;
     });
   });

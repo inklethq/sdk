@@ -6,6 +6,15 @@ The v0.1 release supports PAT authentication, Display and Presentation reads,
 Content lifecycle operations, and high-level Auto, Manual, and Hardcode Push
 workflows.
 
+Targetless Presentation generation is available for software-only experiences:
+it produces versioned Scene JSON and PNG renditions without requiring a
+registered Display.
+
+Auto and Manual Push use Inklet AI processing and require an active Pro
+subscription. Hardcode Push does not use AI and remains available on the Free
+plan. Subscription checkout and management stay in the
+[Inklet portal](https://portal.iminklet.com/subscription), not in this SDK.
+
 ## Requirements
 
 - Node.js 20 or newer
@@ -67,6 +76,45 @@ if (current) {
 
 `displays.current()` is read-only and returns `null` when the Display has no
 confirmed Presentation.
+
+## Generate a Presentation without a Display
+
+Use `presentations.generate()` when the result will be shown in software, a
+Widget, a website, or a device adapter owned by the caller. This path does not
+register a Display, publish a queue entry, or send MQTT.
+
+```ts
+const generation = await inklet.presentations.generate({
+  idempotencyKey: "weekly-card-2026-08-29",
+  intent: "Create a calm, glanceable summary",
+  assets: [
+    inklet.assets.text("Revenue increased 12% this week."),
+  ],
+  output: {
+    viewport: { width: 360, height: 170 },
+    formats: ["scene", "png"],
+  },
+});
+
+const presentation = await inklet.presentations.waitUntilReady(generation);
+
+console.log(presentation.scene?.data);
+console.log(presentation.renditions[0]?.url);
+```
+
+The Scene uses the versioned
+`application/vnd.inklet.scene+json;version=1` media type. A stored Scene can be
+rendered at another size without rerunning AI:
+
+```ts
+const rendition = await inklet.presentations.render(presentation.id, {
+  viewport: { width: 720, height: 340 },
+});
+```
+
+`output.preset` can replace `output.viewport`; supported presets include
+`default`, `macos-widget-small`, `macos-widget-medium`, and
+`macos-widget-large`.
 
 ## Push
 
@@ -167,6 +215,7 @@ import {
   AuthenticationFailedError,
   InkletError,
   RateLimitError,
+  SubscriptionRequiredError,
 } from "@inklethq/sdk";
 
 try {
@@ -174,6 +223,8 @@ try {
 } catch (error) {
   if (error instanceof AuthenticationFailedError) {
     // Replace or reactivate the PAT.
+  } else if (error instanceof SubscriptionRequiredError) {
+    // Upgrade in the Inklet portal, then retry with the same PAT.
   } else if (error instanceof RateLimitError) {
     // Retry according to your application policy.
   } else if (error instanceof InkletError) {

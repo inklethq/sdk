@@ -13,6 +13,7 @@ import {
   PermissionDeniedError,
   RateLimitError,
   RevokedSecretKeyError,
+  SubscriptionRequiredError,
 } from "./errors.js";
 import { AssetsResource } from "./assets.js";
 import { ContentsResource } from "./contents.js";
@@ -101,7 +102,7 @@ export class InkletClient {
     };
     this.assets = new AssetsResource();
     this.contents = new ContentsResource(transport);
-    this.presentations = new PresentationsResource(transport);
+    this.presentations = new PresentationsResource(transport, this.contents);
     this.displays = new DisplaysResource(transport);
     this.push = new PushResource(transport, this.contents);
   }
@@ -406,6 +407,10 @@ async function createResponseError(
     payload.message ?? defaultErrorMessage(response.status),
     secretKey,
   );
+
+  if (serverCode === "subscription_required") {
+    return new SubscriptionRequiredError(safeMessage || undefined, options);
+  }
 
   if (response.status === 403) {
     return new PermissionDeniedError(

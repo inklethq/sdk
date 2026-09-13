@@ -16,10 +16,14 @@ export {
   InvalidResponseError,
   InvalidSecretKeyError,
   NetworkError,
+  OperationAbortedError,
+  OperationTimeoutError,
+  PresentationGenerationError,
   NotFoundError,
   PermissionDeniedError,
   RateLimitError,
   RevokedSecretKeyError,
+  SubscriptionRequiredError,
   ConflictError,
   PayloadTooLargeError,
   AssetUploadError,
@@ -78,13 +82,35 @@ export {
 } from "./displays.js";
 
 export {
+  INKLET_SCENE_MEDIA_TYPE,
+  type InkletScene,
+  type InkletSceneElement,
+  type InkletSceneFrame,
+  type PresentationColorMode,
+  type PresentationOutput,
+  type PresentationOutputFormat,
+  type PresentationOutputRequest,
+  type PresentationScene,
+  type PresentationViewport,
+} from "./scene.js";
+
+export {
   PresentationsResource,
+  type CreatePresentationRenditionInput,
+  type GenerateAutoPresentationInput,
+  type GenerateHardcodePresentationInput,
+  type GeneratePresentationInput,
+  type ListPresentationsOptions,
   type Presentation,
+  type PresentationGeneration,
   type PresentationImage,
   type PresentationImageFormat,
+  type PresentationPage,
   type PresentationProblem,
+  type PresentationRendition,
   type PresentationState,
   type RetrievePresentationOptions,
+  type WaitUntilReadyOptions,
 } from "./presentations.js";
 
 export {

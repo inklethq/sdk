@@ -10,6 +10,12 @@ import {
 } from "./assets.js";
 import type { PresentationProblem } from "./presentations.js";
 import {
+  parsePresentationOutput,
+  validatePresentationOutputRequest,
+  type PresentationOutput,
+  type PresentationOutputRequest,
+} from "./scene.js";
+import {
   SDK_API_PREFIX,
   appendCursorAndLimit,
   encodePathSegment,
@@ -65,6 +71,8 @@ export interface Content {
   requestedDisplayId: string | null;
   intent: string | null;
   title: string | null;
+  /** Non-null when this Content generates one targetless Presentation. */
+  output: PresentationOutput | null;
   state: ContentState;
   assets: readonly ContentAsset[];
   upload: ContentUpload;
@@ -134,6 +142,12 @@ export interface CreateContentRequest {
   displayId?: string | null;
   intent?: string | null;
   title?: string | null;
+  /**
+   * Generate a Presentation without delivering it to a Display.
+   *
+   * Omit this field to preserve the v0.1 Display Push behavior.
+   */
+  output?: PresentationOutputRequest;
   assets: readonly CreateContentAssetInput[];
 }
 
@@ -227,7 +241,19 @@ function validateCreateContentRequest(input: CreateContentRequest): void {
   }
   validateEnumOption(input.mode, ["auto", "manual", "hardcode"], "mode");
 
-  if (input.mode === "auto") {
+  if (input.output !== undefined) {
+    validatePresentationOutputRequest(input.output);
+    if (input.mode === "manual") {
+      throw new ConfigurationError(
+        "Targetless Presentation generation supports auto or hardcode mode, not manual.",
+      );
+    }
+    if (input.displayId !== undefined && input.displayId !== null) {
+      throw new ConfigurationError(
+        "Targetless Presentation Content must omit displayId.",
+      );
+    }
+  } else if (input.mode === "auto") {
     if (input.displayId !== undefined && input.displayId !== null) {
       throw new ConfigurationError("Auto Content must omit displayId.");
     }
@@ -401,6 +427,7 @@ export function parseContent(record: Record<string, unknown>): Content {
     requestedDisplayId: nullableString(record.requestedDisplayId),
     intent: nullableString(record.intent),
     title: nullableString(record.title),
+    output: parsePresentationOutput(record.output),
     state,
     assets: expectRecordArray(record.assets).map(parseAsset),
     upload: {

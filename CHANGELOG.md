@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- Add `SubscriptionRequiredError` for plan-gated SDK operations.
+- Document that Auto and Manual Push require Pro while Hardcode remains
+  available on Free.
+- Add targetless `presentations.generate()`, `waitUntilReady()`, list, and
+  rendition rendering so Scene JSON and PNG output no longer require a
+  registered Display.
+- Add the typed, versioned `inklet Scene v1` contract and output profiles for
+  software surfaces such as macOS Widgets.
+
 ## 0.1.0 — 2026-08-13
 
 - Add typed Display, Content, Presentation, Asset, and Push resources.

@@ -362,6 +362,123 @@ describe("SDK v1 Push workflow", () => {
   });
 });
 
+describe("SDK v1 targetless Presentation workflow", () => {
+  it("generates Scene JSON and PNG without a registered Display", async () => {
+    let createBody;
+    let contentReads = 0;
+    const client = new Inklet({
+      pat: PAT,
+      fetch: async (input, init = {}) => {
+        const url = new URL(input);
+        if (url.pathname === "/api/sdk/v1/contents" && init.method === "POST") {
+          createBody = JSON.parse(init.body);
+          return json({
+            content: contentFixture({
+              state: "pending",
+              stage: "awaiting_upload",
+              output: outputFixture(),
+            }),
+            uploadTickets: [],
+          }, 201);
+        }
+        if (url.pathname === `/api/sdk/v1/contents/${CONTENT_ID}/confirm`) {
+          return json(contentFixture({
+            state: "processing",
+            stage: "summarizing",
+            output: outputFixture(),
+          }));
+        }
+        if (url.pathname === `/api/sdk/v1/contents/${CONTENT_ID}`) {
+          contentReads += 1;
+          return json(contentFixture({
+            state: "ready",
+            stage: "complete",
+            output: outputFixture(),
+            presentationIds: [PRESENTATION_ID],
+          }));
+        }
+        if (url.pathname === `/api/sdk/v1/presentations/${PRESENTATION_ID}`) {
+          return json(generatedPresentationFixture());
+        }
+        throw new Error(`Unexpected URL: ${url}`);
+      },
+    });
+
+    const generation = await client.presentations.generate({
+      idempotencyKey: "targetless-generate-1",
+      assets: [client.assets.text("A calm weekly summary")],
+      output: {
+        viewport: { width: 360, height: 170 },
+        formats: ["scene", "png"],
+      },
+    });
+
+    assert.equal(createBody.displayId, null);
+    assert.deepEqual(createBody.output, {
+      viewport: { width: 360, height: 170 },
+      formats: ["scene", "png"],
+    });
+
+    const presentation = await client.presentations.waitUntilReady(generation, {
+      pollIntervalMs: 100,
+      timeoutMs: 1_000,
+    });
+    assert.equal(contentReads, 1);
+    assert.equal(presentation.kind, "generated");
+    assert.equal(presentation.displayId, null);
+    assert.equal(presentation.scene.data.elements[0].properties.text, "A calm weekly summary");
+    assert.equal(presentation.renditions[0].width, 360);
+  });
+
+  it("renders another PNG from a stored Scene without rerunning AI", async () => {
+    let body;
+    const client = new Inklet({
+      pat: PAT,
+      fetch: async (input, init = {}) => {
+        const url = new URL(input);
+        assert.equal(
+          url.pathname,
+          `/api/sdk/v1/presentations/${PRESENTATION_ID}/renditions`,
+        );
+        assert.equal(init.method, "POST");
+        body = JSON.parse(init.body);
+        return json(generatedPresentationFixture().renditions[0]);
+      },
+    });
+
+    const rendition = await client.presentations.render(PRESENTATION_ID, {
+      viewport: { width: 360, height: 170 },
+    });
+    assert.deepEqual(body, {
+      viewport: { width: 360, height: 170 },
+      formats: ["png"],
+    });
+    assert.equal(rendition.mediaType, "image/png");
+  });
+
+  it("rejects ambiguous output profiles before requesting", async () => {
+    let requested = false;
+    const client = new Inklet({
+      pat: PAT,
+      fetch: async () => {
+        requested = true;
+        return json({});
+      },
+    });
+    await assert.rejects(
+      client.presentations.generate({
+        assets: [client.assets.text("Hello")],
+        output: {
+          preset: "macos-widget-medium",
+          viewport: { width: 360, height: 170 },
+        },
+      }),
+      ConfigurationError,
+    );
+    assert.equal(requested, false);
+  });
+});
+
 describe("SDK v1 errors", () => {
   it("preserves the backend error code, request ID, and details", async () => {
     const client = new Inklet({
@@ -445,6 +562,59 @@ function presentationFixture() {
   };
 }
 
+function outputFixture() {
+  return {
+    formats: ["scene", "png"],
+    preset: null,
+    viewport: { width: 360, height: 170 },
+    colorMode: "color",
+  };
+}
+
+function generatedPresentationFixture() {
+  return {
+    id: PRESENTATION_ID,
+    displayId: null,
+    contentIds: [CONTENT_ID],
+    mode: "auto",
+    state: "ready",
+    output: outputFixture(),
+    scene: {
+      mediaType: "application/vnd.inklet.scene+json;version=1",
+      version: 1,
+      data: {
+        version: 1,
+        viewport: { width: 360, height: 170 },
+        background: "#ffffff",
+        elements: [{
+          id: "headline",
+          type: "text",
+          frame: { x: 20, y: 20, width: 320, height: 80 },
+          properties: {
+            text: "A calm weekly summary",
+            fontSize: 28,
+            color: "#000000",
+          },
+        }],
+      },
+    },
+    renditions: [{
+      id: "01942345-6789-7abc-def0-123456789abc",
+      mediaType: "image/png",
+      format: "png",
+      width: 360,
+      height: 170,
+      url: "https://cdn.example/generated.png?signature=redacted",
+      expiresAt: "2026-08-12T10:15:00Z",
+      updatedAt: "2026-08-12T10:02:00Z",
+    }],
+    image: null,
+    failure: null,
+    createdAt: "2026-08-12T10:00:00Z",
+    updatedAt: "2026-08-12T10:02:00Z",
+  };
+}
+
 function contentFixture({
   mode = "auto",
   displayId = null,
@@ -452,6 +622,8 @@ function contentFixture({
   stage = "awaiting_upload",
   binary = false,
   uploaded = false,
+  output,
+  presentationIds = [],
 } = {}) {
   return {
     id: CONTENT_ID,
@@ -459,6 +631,7 @@ function contentFixture({
     requestedDisplayId: displayId,
     intent: null,
     title: null,
+    ...(output === undefined ? {} : { output }),
     state,
     assets: binary
       ? [{
@@ -486,7 +659,7 @@ function contentFixture({
       failedAssetIndexes: [],
     },
     processing: { stage, warnings: [], error: null },
-    presentationIds: [],
+    presentationIds,
     createdAt: "2026-08-12T10:00:00Z",
     updatedAt: "2026-08-12T10:00:01Z",
   };

@@ -91,6 +91,20 @@ export class PermissionDeniedError extends InkletError {
   }
 }
 
+/**
+ * The authenticated user does not have the subscription required by a
+ * server-side feature. Subscription changes are managed in the Inklet portal;
+ * retrying the same request before the plan changes will not help.
+ */
+export class SubscriptionRequiredError extends PermissionDeniedError {
+  constructor(
+    message = "This Inklet feature requires an active Pro subscription. Manage the subscription in the Inklet portal, then retry with the same personal access token.",
+    options: Omit<InkletErrorOptions, "code"> = {},
+  ) {
+    super(message, { ...options, code: "subscription_required" });
+  }
+}
+
 export class NotFoundError extends InkletError {
   constructor(
     message: string,
@@ -179,5 +193,39 @@ export class InvalidResponseError extends InkletError {
 export class NetworkError extends InkletError {
   constructor(message: string, options: Omit<InkletErrorOptions, "code"> = {}) {
     super(message, { ...options, code: "network_error" });
+  }
+}
+
+export class OperationTimeoutError extends InkletError {
+  constructor(
+    message: string,
+    options: Omit<InkletErrorOptions, "code"> = {},
+  ) {
+    super(message, { ...options, code: "operation_timed_out" });
+  }
+}
+
+export class OperationAbortedError extends InkletError {
+  constructor(
+    message: string,
+    options: Omit<InkletErrorOptions, "code"> = {},
+  ) {
+    super(message, { ...options, code: "operation_aborted" });
+  }
+}
+
+export class PresentationGenerationError extends InkletError {
+  readonly contentId: string;
+
+  constructor(
+    message: string,
+    options: Omit<InkletErrorOptions, "code"> & { contentId: string },
+  ) {
+    super(message, {
+      ...options,
+      code: "presentation_generation_failed",
+      details: { ...options.details, contentId: options.contentId },
+    });
+    this.contentId = options.contentId;
   }
 }

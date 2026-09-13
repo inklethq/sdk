@@ -18,6 +18,7 @@ import {
   InvalidResponseError,
 } from "./errors.js";
 import type { ResourceTransport } from "./resource.js";
+import type { PresentationOutputRequest } from "./scene.js";
 
 interface BasePushInput {
   idempotencyKey?: string;
@@ -58,20 +59,23 @@ interface PreparedBinary {
 }
 
 export class PushResource {
-  readonly #transport: ResourceTransport;
-  readonly #contents: ContentsResource;
+  readonly #submission: ContentSubmissionRunner;
 
   constructor(transport: ResourceTransport, contents: ContentsResource) {
-    this.#transport = transport;
-    this.#contents = contents;
+    this.#submission = new ContentSubmissionRunner(transport, contents);
   }
 
   async auto(input: AutoPushInput): Promise<AutoPushResult> {
-    return this.#run("auto", input, null, input?.assets);
+    return this.#submission.run("auto", input, null, input?.assets);
   }
 
   async manual(input: ManualPushInput): Promise<ManualPushResult> {
-    return this.#run("manual", input, input?.displayId, input?.assets);
+    return this.#submission.run(
+      "manual",
+      input,
+      input?.displayId,
+      input?.assets,
+    );
   }
 
   async hardcode(input: HardcodePushInput): Promise<HardcodePushResult> {
@@ -92,30 +96,51 @@ export class PushResource {
     // The backend intentionally preserves the existing custom-image behavior:
     // it scales the submitted image to the Display's output geometry. Do not
     // reject a Push because its input dimensions differ from the panel.
-    return this.#run("hardcode", input, input.displayId, [input.image]);
+    return this.#submission.run("hardcode", input, input.displayId, [input.image]);
+  }
+}
+
+interface SubmissionOptions {
+  output?: PresentationOutputRequest;
+  operation?: "Push" | "Presentation generation";
+}
+
+/** @internal Shared upload/confirm orchestration for Push and generation. */
+export class ContentSubmissionRunner {
+  readonly #transport: ResourceTransport;
+  readonly #contents: ContentsResource;
+
+  constructor(transport: ResourceTransport, contents: ContentsResource) {
+    this.#transport = transport;
+    this.#contents = contents;
   }
 
-  async #run(
+  async run(
     mode: ContentMode,
     input: BasePushInput,
     displayId: string | null | undefined,
     assets: readonly InkletAsset[] | undefined,
+    options: SubmissionOptions = {},
   ): Promise<PushResult> {
+    const operation = options.operation ?? "Push";
     if (!input || typeof input !== "object" || !Array.isArray(assets)) {
       throw new ConfigurationError(
-        `${capitalized(mode)} Push requires an assets array.`,
+        `${capitalized(mode)} ${operation} requires an assets array.`,
       );
     }
     if (assets.length === 0) {
       throw new ConfigurationError(
-        `${capitalized(mode)} Push requires at least one Asset.`,
+        `${capitalized(mode)} ${operation} requires at least one Asset.`,
       );
     }
     if (
+      options.output === undefined &&
       mode !== "auto" &&
       (typeof displayId !== "string" || displayId.trim().length === 0)
     ) {
-      throw new ConfigurationError(`${capitalized(mode)} Push requires displayId.`);
+      throw new ConfigurationError(
+        `${capitalized(mode)} ${operation} requires displayId.`,
+      );
     }
 
     const prepared = prepareAssets(assets);
@@ -123,9 +148,13 @@ export class PushResource {
     const created = await this.#contents.create(
       {
         mode,
-        displayId: mode === "auto" ? null : (displayId as string).trim(),
+        displayId:
+          options.output !== undefined || mode === "auto"
+            ? null
+            : (displayId as string).trim(),
         intent: input.intent ?? null,
         title: input.title ?? null,
+        ...(options.output === undefined ? {} : { output: options.output }),
         assets: prepared.request,
       },
       idempotencyKey,
