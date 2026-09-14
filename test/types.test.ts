@@ -4,6 +4,8 @@ import {
   NoChangeError,
   SubscriptionRequiredError,
   type Analysis,
+  type AnalysisScope,
+  type AnalysisScopeInput,
   type AnalyzeInput,
   type AutoPushInput,
   type Content,
@@ -55,12 +57,20 @@ const generationInput = {
   },
 } satisfies GeneratePresentationInput;
 
+const scopeInput = { since: "72h" } satisfies AnalysisScopeInput;
+
 const analyzeInput = {
   contentIds: ["content_123"],
   context: "history",
-  scope: { since: "72h" },
+  scope: scopeInput,
   target: { output: { preset: "macos-widget-medium" } },
 } satisfies AnalyzeInput;
+
+void client.analyses.retrieve("analysis_123").then((analysis) => {
+  const scope: AnalysisScope | null = analysis.scope;
+  const sinceAt: string | null | undefined = scope?.sinceAt;
+  void sinceAt;
+});
 
 const analysisPromise: Promise<Analysis> = client.analyze(analyzeInput);
 const historyOnly: Promise<Analysis> = client.analyze({});

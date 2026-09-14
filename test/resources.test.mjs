@@ -554,13 +554,44 @@ describe("SDK v1 Analysis", () => {
       pat: PAT,
       fetch: async (_input, init = {}) => {
         body = JSON.parse(init.body);
-        return json(analysisFixture({ context: "history", scope: { since: "72h" } }), 202);
+        return json(
+          analysisFixture({
+            context: "history",
+            scope: { since: "72h", sinceAt: "2026-08-09T10:00:02Z" },
+          }),
+          202,
+        );
       },
     });
-    await client.analyze({ scope: { since: "72h" } });
+    const analysis = await client.analyze({ scope: { since: "72h" } });
     assert.equal(body.context, "history");
     assert.deepEqual(body.contentIds, []);
+    // Only `since` goes out; `sinceAt` is resolved by the backend.
     assert.deepEqual(body.scope, { since: "72h" });
+    assert.deepEqual(analysis.scope, {
+      since: "72h",
+      sinceAt: "2026-08-09T10:00:02Z",
+    });
+  });
+
+  it("never sends sinceAt, and reads a scope without it as null", async () => {
+    let body;
+    const client = new Inklet({
+      pat: PAT,
+      fetch: async (_input, init = {}) => {
+        body = JSON.parse(init.body);
+        return json(
+          analysisFixture({ context: "history", scope: { since: "24h" } }),
+          202,
+        );
+      },
+    });
+    const analysis = await client.analyze({
+      // A caller echoing a parsed Analysis scope back must not leak sinceAt.
+      scope: { since: "24h", sinceAt: "2026-08-11T10:00:02Z" },
+    });
+    assert.deepEqual(body.scope, { since: "24h" });
+    assert.deepEqual(analysis.scope, { since: "24h", sinceAt: null });
   });
 
   it("rejects submitted context without Content, and scope with submitted context", async () => {

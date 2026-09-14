@@ -46,9 +46,20 @@ export type AnalysisOutcome = "presentations" | "no_change";
  */
 export type AnalysisContext = "submitted" | "history";
 
-/** Relative look-back window, e.g. `"24h"`, `"7d"`, `"90m"`. */
-export interface AnalysisScope {
+/** Requested look-back window: a relative duration, e.g. `"24h"`, `"7d"`, `"90m"`. */
+export interface AnalysisScopeInput {
   since: string;
+}
+
+/** The window the backend resolved at creation time. */
+export interface AnalysisScope extends AnalysisScopeInput {
+  /**
+   * Absolute start of the window, resolved from `since` when the Analysis was
+   * created, so a queued Analysis reads the same history it would have read
+   * immediately. The window is `[sinceAt, createdAt]`. `null` when the backend
+   * did not report it.
+   */
+  sinceAt: string | null;
 }
 
 export type AnalysisTargetInput =
@@ -93,7 +104,7 @@ export interface AnalyzeInput {
   /** Defaults to `submitted` when `contentIds` is given, else `history`. */
   context?: AnalysisContext;
   /** Only meaningful with `context: "history"`. */
-  scope?: AnalysisScope;
+  scope?: AnalysisScopeInput;
   intent?: string | null;
   title?: string | null;
   /** Omit to let the agent choose Displays. */
@@ -280,7 +291,7 @@ interface WireCreateAnalysis {
   mode: AnalysisMode;
   contentIds: string[];
   context: AnalysisContext;
-  scope: AnalysisScope | null;
+  scope: AnalysisScopeInput | null;
   intent: string | null;
   title: string | null;
   target: AnalysisTargetInput | null;
@@ -302,11 +313,12 @@ function normalizeCreateRequest(input: CreateAnalysisRequest): WireCreateAnalysi
     );
   }
 
+  let scope: AnalysisScopeInput | null = null;
   if (input.scope !== undefined) {
     if (context !== "history") {
       throw new ConfigurationError("scope is only valid with context \"history\".");
     }
-    validateScope(input.scope);
+    scope = validateScope(input.scope);
   }
 
   for (const [name, value] of [["intent", input.intent], ["title", input.title]] as const) {
@@ -333,7 +345,7 @@ function normalizeCreateRequest(input: CreateAnalysisRequest): WireCreateAnalysi
     mode: input.mode,
     contentIds,
     context,
-    scope: input.scope ?? null,
+    scope,
     intent: input.intent ?? null,
     title: input.title ?? null,
     target,
@@ -359,7 +371,8 @@ function normalizeContentIds(value: readonly string[] | undefined): string[] {
   return ids;
 }
 
-function validateScope(scope: AnalysisScope): void {
+/** Returns only `since`: `sinceAt` is resolved by the backend, never sent. */
+function validateScope(scope: AnalysisScopeInput): AnalysisScopeInput {
   if (
     !scope ||
     typeof scope !== "object" ||
@@ -370,6 +383,7 @@ function validateScope(scope: AnalysisScope): void {
       "scope.since must be a relative duration such as \"90m\", \"24h\", or \"7d\".",
     );
   }
+  return { since: scope.since };
 }
 
 function normalizeTarget(target: AnalysisTargetInput): AnalysisTargetInput {
@@ -447,7 +461,7 @@ function parseScope(value: unknown): AnalysisScope | null {
   if (!SCOPE_PATTERN.test(since)) {
     throw new InvalidResponseError();
   }
-  return { since };
+  return { since, sinceAt: nullableString(record.sinceAt) };
 }
 
 function parseTarget(value: unknown): AnalysisTarget | null {

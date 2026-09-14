@@ -76,6 +76,7 @@ export {
   type AnalysisOutcome,
   type AnalysisPage,
   type AnalysisScope,
+  type AnalysisScopeInput,
   type AnalysisState,
   type AnalysisTarget,
   type AnalysisTargetInput,
