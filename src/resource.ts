@@ -18,8 +18,18 @@ export interface PresignedUpload {
 
 export type InkletUpload = (upload: PresignedUpload) => Promise<void>;
 
+/**
+ * Authenticated request that resolves with the raw `Response`, for endpoints
+ * whose body has to be consumed incrementally (server-sent events).
+ */
+export type InkletRequestRaw = (
+  path: string,
+  options?: InkletRequestOptions,
+) => Promise<Response>;
+
 export interface ResourceTransport {
   request: InkletRequest;
+  requestRaw: InkletRequestRaw;
   upload: InkletUpload;
 }
 

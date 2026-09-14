@@ -9,6 +9,7 @@ import {
   InvalidSecretKeyError,
   NetworkError,
   NotFoundError,
+  OperationAbortedError,
   PayloadTooLargeError,
   PermissionDeniedError,
   RateLimitError,
@@ -105,6 +106,7 @@ export class InkletClient {
 
     const transport: ResourceTransport = {
       request: this.request.bind(this),
+      requestRaw: this.requestRaw.bind(this),
       upload: this.upload.bind(this),
     };
     this.assets = new AssetsResource();
@@ -132,10 +134,19 @@ export class InkletClient {
     return this.analyses.direct(input);
   }
 
-  async request<T = unknown>(
+  /**
+   * Send an authenticated request and return the raw `Response` without
+   * reading the body.
+   *
+   * Non-2xx responses still throw the usual typed errors, so a caller only
+   * ever receives a successful response. Use this for streaming endpoints such
+   * as the Analysis event stream, where the body must be consumed
+   * incrementally; `request()` is the right choice for everything else.
+   */
+  async requestRaw(
     path: string,
     options: InkletRequestOptions = {},
-  ): Promise<T> {
+  ): Promise<Response> {
     assertServerEnvironment();
     const url = resolveRequestUrl(this.baseUrl, path);
     const { json, body, headers: suppliedHeaders, ...requestInit } = options;
@@ -147,7 +158,9 @@ export class InkletClient {
     }
 
     const headers = new Headers(suppliedHeaders);
-    headers.set("accept", "application/json");
+    if (!headers.has("accept")) {
+      headers.set("accept", "application/json");
+    }
     headers.set("authorization", `Bearer ${this.#secretKey}`);
 
     let requestBody = body;
@@ -180,20 +193,37 @@ export class InkletClient {
         throw cause;
       }
 
+      if (requestInit.signal?.aborted) {
+        throw new OperationAbortedError("The Inklet request was aborted.");
+      }
+
       throw new NetworkError(
         `Unable to reach the Inklet service at ${new URL(this.baseUrl).origin}. Check the service address and network connection.`,
       );
     }
 
-    const requestId = getRequestId(response);
     if (!response.ok) {
-      throw await createResponseError(response, requestId, this.#secretKey);
+      throw await createResponseError(
+        response,
+        getRequestId(response),
+        this.#secretKey,
+      );
     }
+
+    return response;
+  }
+
+  async request<T = unknown>(
+    path: string,
+    options: InkletRequestOptions = {},
+  ): Promise<T> {
+    const response = await this.requestRaw(path, options);
+    const requestId = getRequestId(response);
 
     if (
       response.status === 204 ||
       response.status === 205 ||
-      requestInit.method?.toUpperCase() === "HEAD"
+      options.method?.toUpperCase() === "HEAD"
     ) {
       return undefined as T;
     }
