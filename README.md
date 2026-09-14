@@ -149,6 +149,95 @@ A timeout throws `OperationTimeoutError` but does not cancel the Analysis;
 Scheduled analyses created by Inklet appear in
 `inklet.analyses.list({ trigger: "scheduled" })`.
 
+## Watch the agent work in real time
+
+An Analysis publishes an ordered event stream: what the agent was given, which
+tools it called, what it planned, and how the result was rendered and
+delivered. `watch()` follows it live and ends on its own once the Analysis is
+`completed` or `failed`.
+
+```ts
+const analysis = await inklet.analyze({ contentIds: [content.id] });
+
+for await (const ev of inklet.analyses.watch(analysis.id)) {
+  console.log(ev.summary);
+}
+```
+
+Every event carries `seq` (monotonic, use it to resume), `at`, `attempt`,
+`source` (`agent` or `backend`), `type`, `level`, a ready-to-display `summary`,
+and structured `data`. Switch on the types you care about and fall back to
+`summary` for the rest — `type` is an open set, and a type this SDK has never
+seen still parses:
+
+```ts
+for await (const ev of inklet.analyses.watch(analysis.id, { after: lastSeq, signal })) {
+  if (ev.type === "tool.called") console.log("tool:", ev.data.name);
+  else if (ev.level === "error") console.error(ev.summary);
+  lastSeq = ev.seq;
+}
+```
+
+`watch()` handles the transport for you:
+
+- It reads server-sent events, and reconnects from the last `seq` with
+  `Last-Event-ID` if the connection drops (five attempts, exponential
+  back-off), so nothing is lost across a reconnect.
+- If the response is not `text/event-stream` — which is what an intermediate
+  proxy that cannot carry streaming responses returns — it falls back to
+  polling `listEvents()` every `pollIntervalMs` (1,000 ms by default) until the
+  Analysis is terminal. The events you receive are the same either way.
+- `signal` aborts the iteration with `OperationAbortedError`. Breaking out of
+  the `for await` loop closes the connection.
+
+Live events carry `summary` only. Once the Analysis has finished, read the
+whole run — including verbatim tool inputs and outputs — with `timeline()`,
+which pages through every event for you:
+
+```ts
+await inklet.analyses.wait(analysis);
+
+for await (const ev of inklet.analyses.timeline(analysis.id, { detail: "full" })) {
+  if (ev.type === "tool.finished") {
+    console.log(ev.detail?.isError ? "failed" : "ok", ev.detail?.output);
+  }
+}
+```
+
+`detail: "full"` is only available on a `completed` or `failed` Analysis; asked
+for earlier it throws `ConflictError` with `code: "analysis_in_progress"`.
+`timeline()` checks the state before it starts rather than failing part way
+through. For manual paging, `listEvents(id, { after, limit, detail })` returns
+one page plus `nextAfter`, `hasMore`, and the current `state`.
+
+`analyses.archive(id)` returns a short-lived `{ url, expiresAt }` for the full
+run archive, or throws `NotFoundError` with `code: "archive_not_found"` when
+there is none.
+
+### Streaming to a Portal or browser UI
+
+This SDK is server-only: a personal access token must never reach a browser, so
+run `watch()` on your server and relay events to the client over your own
+channel (SSE, WebSocket, or whatever the Portal already uses).
+
+In browser code, read that relay with `fetch` plus `ReadableStream`, not
+`EventSource`. `EventSource` cannot set request headers — no `Authorization`,
+no `Last-Event-ID` of your choosing — cannot send a body, and gives you no
+access to the response status or content type, so it cannot tell a stream that
+a proxy has downgraded from a real one. Reading the body yourself is what lets
+the SDK fall back to polling and resume from the last `seq`, and the same
+applies to your relay:
+
+```ts
+const response = await fetch("/api/analysis-events?id=" + id, {
+  headers: { accept: "text/event-stream" },
+  signal,
+});
+const reader = response.body!.getReader();
+const decoder = new TextDecoder();
+// Buffer partial lines: chunk boundaries fall anywhere, including mid-line.
+```
+
 ## Switch the image on a Display
 
 Picking what is on the panel needs no AI and no new Content. Neither call

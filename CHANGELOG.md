@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+- Add the Analysis event stream: `analyses.watch()` follows a running Analysis
+  live and yields `AnalysisEvent`s as the agent works, `analyses.listEvents()`
+  reads one page, `analyses.timeline()` pages through every event, and
+  `analyses.archive()` returns a short-lived run-archive URL. Adds
+  `AnalysisEvent`, `AnalysisEventLevel`, `AnalysisEventSource`,
+  `AnalysisEventDetail`, `AnalysisEventDetailLevel`, `AnalysisEventPage`,
+  `ListAnalysisEventsOptions`, `WatchAnalysisOptions`, `TimelineOptions`, and
+  `AnalysisArchive`.
+- `watch()` parses server-sent events incrementally, resumes from the last
+  `seq` with `Last-Event-ID` after a dropped connection (five attempts,
+  exponential back-off), and falls back to polling `listEvents()` when an
+  intermediate proxy answers with something other than `text/event-stream`.
+  `signal` aborts with `OperationAbortedError`.
+- Event `type` is an open set: unknown types parse rather than failing the
+  stream, so a backend that adds an event type does not break older SDKs.
+- `timeline({ detail: "full" })` verifies the Analysis is `completed` or
+  `failed` before the first page and otherwise throws `ConflictError` with
+  `code: "analysis_in_progress"`, matching the backend's 409.
+- Add `InkletClient.requestRaw()`, which returns the raw `Response` for
+  streaming endpoints, and a matching `requestRaw` on the internal resource
+  transport. `request()` now keeps a caller-supplied `accept` header, and an
+  aborted request throws `OperationAbortedError` instead of `NetworkError`.
+
 - **Breaking:** `Presentation.contentIds` and `DisplayQueueItem.contentIds` are
   ordered `{ id, role }` refs instead of bare UUIDs, where `role` is `input`
   (named by the Analysis) or `context` (retrieved from history by the agent).
