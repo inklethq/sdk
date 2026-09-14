@@ -5,6 +5,7 @@ import {
   AuthenticationFailedError,
   ConfigurationError,
   Inklet,
+  InvalidResponseError,
   MAX_ASSETS_PER_CONTENT,
   NoChangeError,
 } from "../dist/esm/index.js";
@@ -12,6 +13,7 @@ import {
 const PAT = "il_pat_test_abcdefghijklmnopqrstuvwxyz";
 const DISPLAY_ID = "01912345-6789-7abc-def0-123456789abc";
 const CONTENT_ID = "01922345-6789-7abc-def0-123456789abc";
+const OTHER_CONTENT_ID = "01922345-6789-7abc-def0-123456789abd";
 const PRESENTATION_ID = "01932345-6789-7abc-def0-123456789abc";
 const ANALYSIS_ID = "01952345-6789-7abc-def0-123456789abc";
 
@@ -31,15 +33,7 @@ describe("SDK v1 resource reads", () => {
           case `/api/sdk/v1/displays/${DISPLAY_ID}/queue`:
             return json({
               items: [
-                {
-                  id: PRESENTATION_ID,
-                  displayId: DISPLAY_ID,
-                  contentIds: [CONTENT_ID],
-                  mode: "auto",
-                  state: "queued",
-                  createdAt: "2026-08-12T10:00:00Z",
-                  updatedAt: "2026-08-12T10:01:00Z",
-                },
+                queueItemFixture(),
               ],
               nextCursor: null,
               hasMore: false,
@@ -62,10 +56,13 @@ describe("SDK v1 resource reads", () => {
     const page = await client.displays.list();
     assert.equal(page.items[0].capabilities.pixelWidth, 800);
     assert.equal((await client.displays.retrieve(DISPLAY_ID)).name, "Studio");
-    assert.equal(
-      (await client.displays.listQueue(DISPLAY_ID)).items[0].state,
-      "queued",
-    );
+    const queued = (await client.displays.listQueue(DISPLAY_ID)).items[0];
+    assert.equal(queued.state, "queued");
+    assert.equal(queued.mode, "ai");
+    assert.deepEqual(queued.contentIds, [
+      { id: CONTENT_ID, role: "input" },
+      { id: OTHER_CONTENT_ID, role: "context" },
+    ]);
     assert.equal(
       (await client.displays.current(DISPLAY_ID, { format: "png" })).id,
       PRESENTATION_ID,
@@ -105,6 +102,49 @@ describe("SDK v1 resource reads", () => {
       ConfigurationError,
     );
     assert.equal(requested, false);
+  });
+
+  it("rejects v0.1 Presentation and queue shapes", async () => {
+    const cases = [
+      // contentIds as bare UUIDs instead of { id, role } refs.
+      { ...presentationFixture(), contentIds: [CONTENT_ID] },
+      // A contentIds entry with an unknown role.
+      {
+        ...presentationFixture(),
+        contentIds: [{ id: CONTENT_ID, role: "primary" }],
+      },
+      // The retired auto/manual/hardcode mode values, and the empty string.
+      { ...presentationFixture(), mode: "auto" },
+      { ...presentationFixture(), mode: "manual" },
+      { ...presentationFixture(), mode: "hardcode" },
+      { ...presentationFixture(), mode: "" },
+      // mode is required now; it is no longer defaulted to "".
+      omit(presentationFixture(), "mode"),
+    ];
+
+    for (const body of cases) {
+      const client = new Inklet({ pat: PAT, fetch: async () => json(body) });
+      await assert.rejects(
+        client.presentations.retrieve(PRESENTATION_ID),
+        InvalidResponseError,
+      );
+    }
+
+    for (const item of [
+      queueItemFixture({ contentIds: [CONTENT_ID] }),
+      queueItemFixture({ mode: "auto" }),
+      queueItemFixture({ mode: "" }),
+    ]) {
+      const client = new Inklet({
+        pat: PAT,
+        fetch: async () =>
+          json({ items: [item], nextCursor: null, hasMore: false }),
+      });
+      await assert.rejects(
+        client.displays.listQueue(DISPLAY_ID),
+        InvalidResponseError,
+      );
+    }
   });
 });
 
@@ -687,6 +727,11 @@ function json(body, status = 200, headers = {}) {
   return Response.json(body, { status, headers });
 }
 
+function omit(record, key) {
+  const { [key]: _removed, ...rest } = record;
+  return rest;
+}
+
 function displayFixture() {
   return {
     id: DISPLAY_ID,
@@ -717,13 +762,32 @@ function displayFixture() {
   };
 }
 
+function queueItemFixture(overrides = {}) {
+  return {
+    id: PRESENTATION_ID,
+    displayId: DISPLAY_ID,
+    contentIds: [
+      { id: CONTENT_ID, role: "input" },
+      { id: OTHER_CONTENT_ID, role: "context" },
+    ],
+    mode: "ai",
+    state: "queued",
+    createdAt: "2026-08-12T10:00:00Z",
+    updatedAt: "2026-08-12T10:01:00Z",
+    ...overrides,
+  };
+}
+
 function presentationFixture() {
   return {
     id: PRESENTATION_ID,
     displayId: DISPLAY_ID,
     analysisId: ANALYSIS_ID,
-    contentIds: [CONTENT_ID],
-    mode: "auto",
+    contentIds: [
+      { id: CONTENT_ID, role: "input" },
+      { id: OTHER_CONTENT_ID, role: "context" },
+    ],
+    mode: "ai",
     state: "confirmed",
     image: {
       url: "https://cdn.example/image.png?signature=redacted",
@@ -753,8 +817,8 @@ function generatedPresentationFixture() {
     id: PRESENTATION_ID,
     displayId: null,
     analysisId: ANALYSIS_ID,
-    contentIds: [CONTENT_ID],
-    mode: "auto",
+    contentIds: [{ id: CONTENT_ID, role: "input" }],
+    mode: "ai",
     state: "ready",
     output: outputFixture(),
     scene: {

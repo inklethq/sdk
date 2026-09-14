@@ -13,6 +13,8 @@ import {
   type InkletClientOptions,
   type InkletRequestOptions,
   type Presentation,
+  type PresentationContentRef,
+  type PresentationContentRole,
 } from "@inklethq/sdk";
 
 const options = {
@@ -80,7 +82,22 @@ void client.push.auto(autoInput);
 void client.push.hardcode(hardcodeInput);
 void client.presentations.retrieve("presentation_123", { format: "raw2" });
 const generation = client.presentations.generate(generationInput);
-void generation.then((value) => client.presentations.waitUntilReady(value));
+void generation.then(async (value) => {
+  const presentation = await client.presentations.waitUntilReady(value);
+  const refs: readonly PresentationContentRef[] = presentation.contentIds;
+  const role: PresentationContentRole | undefined = refs[0]?.role;
+  const mode: "ai" | "direct" = presentation.mode;
+  void role;
+  void mode;
+});
+
+void client.displays.listQueue("display_123").then((page) => {
+  const item = page.items[0];
+  const refs: readonly PresentationContentRef[] | undefined = item?.contentIds;
+  const mode: "ai" | "direct" | undefined = item?.mode;
+  void refs;
+  void mode;
+});
 void client.presentations.render("presentation_123", {
   preset: "macos-widget-medium",
 });

@@ -1,8 +1,12 @@
+import type { AnalysisMode } from "./analyses.js";
+import { expectEnum } from "./contents.js";
 import { ConfigurationError, InvalidResponseError } from "./errors.js";
 import {
   formatQuery,
+  parseContentRefs,
   parsePresentation,
   type Presentation,
+  type PresentationContentRef,
   type PresentationImageFormat,
   type PresentationState,
 } from "./presentations.js";
@@ -65,8 +69,10 @@ export interface ListDisplaysOptions {
 export interface DisplayQueueItem {
   id: string;
   displayId: string;
-  contentIds: readonly string[];
-  mode: "auto" | "manual" | "hardcode" | "";
+  /** Same shape and ordering as `Presentation.contentIds`. */
+  contentIds: readonly PresentationContentRef[];
+  /** Same values as `Presentation.mode` and `Analysis.mode`. */
+  mode: AnalysisMode;
   state: PresentationState;
   createdAt: string;
   updatedAt: string;
@@ -190,11 +196,8 @@ export function parseDisplay(record: Record<string, unknown>): Display {
 }
 
 function parseQueueItem(record: Record<string, unknown>): DisplayQueueItem {
-  const mode = record.mode;
   const state = record.state;
   if (
-    typeof mode !== "string" ||
-    !["", "auto", "manual", "hardcode"].includes(mode) ||
     typeof state !== "string" ||
     ![
       "preparing",
@@ -210,8 +213,8 @@ function parseQueueItem(record: Record<string, unknown>): DisplayQueueItem {
   return {
     id: expectString(record, "id"),
     displayId: expectString(record, "displayId"),
-    contentIds: expectStringArray(record.contentIds),
-    mode: mode as DisplayQueueItem["mode"],
+    contentIds: parseContentRefs(record.contentIds),
+    mode: expectEnum(record.mode, ["ai", "direct"] as const),
     state: state as PresentationState,
     createdAt: expectString(record, "createdAt"),
     updatedAt: expectString(record, "updatedAt"),

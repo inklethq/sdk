@@ -2,10 +2,11 @@ import { validateAsset, type ImageAsset, type InkletAsset } from "./assets.js";
 import {
   type Analysis,
   type AnalysisContext,
+  type AnalysisMode,
   type AnalysesResource,
   type WaitForAnalysisOptions,
 } from "./analyses.js";
-import { ContentsResource, parseProblem } from "./contents.js";
+import { ContentsResource, expectEnum, parseProblem } from "./contents.js";
 import {
   ConfigurationError,
   InvalidResponseError,
@@ -20,7 +21,6 @@ import {
   expectRecord,
   expectRecordArray,
   expectString,
-  expectStringArray,
   nullableRecord,
   nullableString,
   parsePage,
@@ -47,6 +47,20 @@ export type PresentationState =
   | "failed";
 
 export type PresentationImageFormat = "png" | "raw2" | "raw4";
+
+/**
+ * How a Content ended up in a Presentation.
+ *
+ * `input`: the caller named it in the Analysis `contentIds`.
+ * `context`: the agent retrieved it from the user's history and used it.
+ */
+export type PresentationContentRole = "input" | "context";
+
+/** One Content used by a Presentation, with the role it played. */
+export interface PresentationContentRef {
+  id: string;
+  role: PresentationContentRole;
+}
 
 export interface PresentationProblem {
   code: string;
@@ -82,10 +96,22 @@ export interface Presentation {
   /** Derived from whether `displayId` is present. */
   kind: "generated" | "display";
   displayId: string | null;
-  /** The Analysis that produced this Presentation, when the backend reports it. */
+  /**
+   * The Analysis that produced this Presentation. Always set by current
+   * backends; `null` only for Presentations stored before Analyses existed.
+   */
   analysisId: string | null;
-  contentIds: readonly string[];
-  mode: "auto" | "manual" | "hardcode" | "";
+  /**
+   * The Contents behind this Presentation, ordered by the backend: `input`
+   * refs first, in the order the Analysis named them, then `context` refs the
+   * agent retrieved itself. A Content appears at most once.
+   */
+  contentIds: readonly PresentationContentRef[];
+  /**
+   * Whether the model produced this Presentation. Same values as
+   * `Analysis.mode`; target, context, and trigger live on the Analysis.
+   */
+  mode: AnalysisMode;
   state: PresentationState;
   output: PresentationOutput | null;
   scene: PresentationScene | null;
@@ -266,8 +292,14 @@ export class PresentationsResource {
 
   /**
    * Wait for the Analysis started by `generate` and return its one
-   * Presentation. Throws `NoChangeError` if the Analysis completed without
-   * producing one.
+   * Presentation. An `{ output }` target always produces exactly one
+   * Presentation, so `NoChangeError` is unreachable on the `generate()` path;
+   * it remains possible when this is called with an Analysis that named no
+   * `contentIds`.
+   *
+   * Analyses with `context: "history"` or `trigger: "scheduled"` queue behind
+   * the user's other history Analyses. Raise `timeoutMs` for those; a timeout
+   * does not cancel the Analysis.
    */
   async waitUntilReady(
     generationOrAnalysis: PresentationGeneration | Analysis | string,
@@ -308,14 +340,6 @@ export class PresentationsResource {
 export function parsePresentation(
   record: Record<string, unknown>,
 ): Presentation {
-  const mode = record.mode ?? "";
-  if (
-    typeof mode !== "string" ||
-    (mode !== "" && mode !== "auto" && mode !== "manual" && mode !== "hardcode")
-  ) {
-    throw new InvalidResponseError();
-  }
-
   const state = expectString(record, "state");
   if (!isPresentationState(state)) {
     throw new InvalidResponseError();
@@ -331,8 +355,8 @@ export function parsePresentation(
     kind: displayId === null ? "generated" : "display",
     displayId,
     analysisId: nullableString(record.analysisId),
-    contentIds: expectStringArray(record.contentIds),
-    mode,
+    contentIds: parseContentRefs(record.contentIds),
+    mode: expectEnum(record.mode, ["ai", "direct"] as const),
     state,
     output: parsePresentationOutput(record.output),
     scene: parsePresentationScene(record.scene),
@@ -342,6 +366,14 @@ export function parsePresentation(
     createdAt: expectString(record, "createdAt"),
     updatedAt: expectString(record, "updatedAt"),
   };
+}
+
+/** Parses the `[{ id, role }]` shape shared by Presentations and queue items. */
+export function parseContentRefs(value: unknown): PresentationContentRef[] {
+  return expectRecordArray(value).map((entry) => ({
+    id: expectString(entry, "id"),
+    role: expectEnum(entry.role, ["input", "context"] as const),
+  }));
 }
 
 function parseRendition(record: Record<string, unknown>): PresentationRendition {

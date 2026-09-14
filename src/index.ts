@@ -120,6 +120,8 @@ export {
   type GeneratePresentationInput,
   type ListPresentationsOptions,
   type Presentation,
+  type PresentationContentRef,
+  type PresentationContentRole,
   type PresentationGeneration,
   type PresentationImage,
   type PresentationImageFormat,
