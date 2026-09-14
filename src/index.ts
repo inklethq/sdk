@@ -91,12 +91,14 @@ export {
   DisplaysResource,
   type CurrentPresentationOptions,
   type Display,
+  type DisplayAdvanceResult,
   type DisplayCapabilities,
   type DisplayPage,
   type DisplayQueueItem,
   type DisplayQueuePage,
   type ListDisplayQueueOptions,
   type ListDisplaysOptions,
+  type WaitUntilCurrentOptions,
 } from "./displays.js";
 
 export {

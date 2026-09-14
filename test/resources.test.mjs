@@ -4,10 +4,13 @@ import {
   AnalysisFailedError,
   AuthenticationFailedError,
   ConfigurationError,
+  ConflictError,
   Inklet,
   InvalidResponseError,
   MAX_ASSETS_PER_CONTENT,
   NoChangeError,
+  OperationAbortedError,
+  OperationTimeoutError,
 } from "../dist/esm/index.js";
 
 const PAT = "il_pat_test_abcdefghijklmnopqrstuvwxyz";
@@ -15,6 +18,7 @@ const DISPLAY_ID = "01912345-6789-7abc-def0-123456789abc";
 const CONTENT_ID = "01922345-6789-7abc-def0-123456789abc";
 const OTHER_CONTENT_ID = "01922345-6789-7abc-def0-123456789abd";
 const PRESENTATION_ID = "01932345-6789-7abc-def0-123456789abc";
+const OTHER_PRESENTATION_ID = "01932345-6789-7abc-def0-123456789abd";
 const ANALYSIS_ID = "01952345-6789-7abc-def0-123456789abc";
 
 describe("SDK v1 resource reads", () => {
@@ -145,6 +149,188 @@ describe("SDK v1 resource reads", () => {
         InvalidResponseError,
       );
     }
+  });
+});
+
+describe("SDK v1 manual Display switching", () => {
+  it("sets the current Presentation and reports it as pending", async () => {
+    const calls = [];
+    const client = new Inklet({
+      pat: PAT,
+      fetch: async (input, init = {}) => {
+        const url = new URL(input);
+        calls.push({
+          path: url.pathname,
+          method: init.method,
+          body: init.body ? JSON.parse(init.body) : null,
+        });
+        return json({
+          display: displayFixture({
+            currentPresentationId: OTHER_PRESENTATION_ID,
+            pendingPresentationId: PRESENTATION_ID,
+          }),
+        });
+      },
+    });
+
+    const display = await client.displays.setCurrent(DISPLAY_ID, PRESENTATION_ID);
+    assert.deepEqual(calls, [
+      {
+        path: `/api/sdk/v1/displays/${DISPLAY_ID}/current`,
+        method: "POST",
+        body: { presentationId: PRESENTATION_ID },
+      },
+    ]);
+    // The panel confirms later, so only pendingPresentationId moves.
+    assert.equal(display.pendingPresentationId, PRESENTATION_ID);
+    assert.equal(display.currentPresentationId, OTHER_PRESENTATION_ID);
+  });
+
+  it("surfaces 409 presentation_not_deliverable as a readable ConflictError", async () => {
+    const client = new Inklet({
+      pat: PAT,
+      fetch: async () =>
+        json(
+          {
+            error: {
+              code: "presentation_not_deliverable",
+              message: "That Presentation cannot be shown on this Display.",
+              details: {
+                presentationId: PRESENTATION_ID,
+                displayId: DISPLAY_ID,
+                reason: "not_delivered",
+              },
+            },
+          },
+          409,
+        ),
+    });
+
+    await assert.rejects(
+      client.displays.setCurrent(DISPLAY_ID, PRESENTATION_ID),
+      (error) => {
+        assert.ok(error instanceof ConflictError);
+        assert.equal(error.code, "presentation_not_deliverable");
+        assert.equal(error.status, 409);
+        assert.equal(error.details.reason, "not_delivered");
+        return true;
+      },
+    );
+  });
+
+  it("advances to the next queued Presentation and reports an empty queue", async () => {
+    const calls = [];
+    let changed = true;
+    const client = new Inklet({
+      pat: PAT,
+      fetch: async (input, init = {}) => {
+        const url = new URL(input);
+        calls.push({ path: url.pathname, method: init.method, body: init.body });
+        return json({
+          display: displayFixture({
+            pendingPresentationId: changed ? PRESENTATION_ID : null,
+          }),
+          changed,
+        });
+      },
+    });
+
+    const advanced = await client.displays.advance(DISPLAY_ID);
+    assert.equal(advanced.changed, true);
+    assert.equal(advanced.display.pendingPresentationId, PRESENTATION_ID);
+
+    changed = false;
+    const empty = await client.displays.advance(DISPLAY_ID);
+    assert.equal(empty.changed, false);
+    assert.equal(empty.display.id, DISPLAY_ID);
+
+    assert.deepEqual(calls, [
+      { path: `/api/sdk/v1/displays/${DISPLAY_ID}/advance`, method: "POST", body: undefined },
+      { path: `/api/sdk/v1/displays/${DISPLAY_ID}/advance`, method: "POST", body: undefined },
+    ]);
+  });
+
+  it("waits until the panel confirms the switch", async () => {
+    let reads = 0;
+    const client = new Inklet({
+      pat: PAT,
+      fetch: async (input) => {
+        assert.equal(new URL(input).pathname, `/api/sdk/v1/displays/${DISPLAY_ID}`);
+        reads += 1;
+        return json(
+          reads < 3
+            ? displayFixture({
+                currentPresentationId: OTHER_PRESENTATION_ID,
+                pendingPresentationId: PRESENTATION_ID,
+              })
+            : displayFixture({
+                currentPresentationId: PRESENTATION_ID,
+                pendingPresentationId: null,
+              }),
+        );
+      },
+    });
+
+    const display = await client.displays.waitUntilCurrent(
+      DISPLAY_ID,
+      PRESENTATION_ID,
+      { pollIntervalMs: 100, timeoutMs: 2_000 },
+    );
+    assert.equal(display.currentPresentationId, PRESENTATION_ID);
+    assert.equal(reads, 3);
+  });
+
+  it("times out without cancelling the switch, and honours an abort signal", async () => {
+    const client = new Inklet({
+      pat: PAT,
+      fetch: async () =>
+        json(
+          displayFixture({
+            currentPresentationId: OTHER_PRESENTATION_ID,
+            pendingPresentationId: PRESENTATION_ID,
+          }),
+        ),
+    });
+
+    await assert.rejects(
+      client.displays.waitUntilCurrent(DISPLAY_ID, PRESENTATION_ID, {
+        pollIntervalMs: 100,
+        timeoutMs: 300,
+      }),
+      (error) => {
+        assert.ok(error instanceof OperationTimeoutError);
+        assert.equal(error.details.presentationId, PRESENTATION_ID);
+        assert.equal(error.details.pendingPresentationId, PRESENTATION_ID);
+        return true;
+      },
+    );
+
+    const controller = new AbortController();
+    const aborted = client.displays.waitUntilCurrent(DISPLAY_ID, PRESENTATION_ID, {
+      pollIntervalMs: 100,
+      timeoutMs: 5_000,
+      signal: controller.signal,
+    });
+    controller.abort();
+    await assert.rejects(aborted, OperationAbortedError);
+  });
+
+  it("validates both ids before requesting", async () => {
+    let requested = false;
+    const client = new Inklet({
+      pat: PAT,
+      fetch: async () => {
+        requested = true;
+        return json({});
+      },
+    });
+    await assert.rejects(client.displays.setCurrent(DISPLAY_ID, "  "), ConfigurationError);
+    await assert.rejects(client.displays.advance(""), ConfigurationError);
+    await assert.rejects(
+      client.displays.waitUntilCurrent(DISPLAY_ID, PRESENTATION_ID, { timeoutMs: 0 }),
+      ConfigurationError,
+    );
+    assert.equal(requested, false);
   });
 });
 
@@ -732,7 +918,7 @@ function omit(record, key) {
   return rest;
 }
 
-function displayFixture() {
+function displayFixture(overrides = {}) {
   return {
     id: DISPLAY_ID,
     hardwareId: "hardware-1",
@@ -759,6 +945,7 @@ function displayFixture() {
       supportedImageContentTypes: ["image/png", "image/jpeg"],
       supportedOutputFormats: ["png", "raw2", "raw4"],
     },
+    ...overrides,
   };
 }
 

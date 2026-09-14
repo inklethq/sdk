@@ -8,6 +8,7 @@ import {
   type AutoPushInput,
   type Content,
   type Display,
+  type DisplayAdvanceResult,
   type GeneratePresentationInput,
   type HardcodePushInput,
   type InkletClientOptions,
@@ -15,6 +16,7 @@ import {
   type Presentation,
   type PresentationContentRef,
   type PresentationContentRole,
+  type WaitUntilCurrentOptions,
 } from "@inklethq/sdk";
 
 const options = {
@@ -90,6 +92,32 @@ void generation.then(async (value) => {
   void role;
   void mode;
 });
+
+const waitUntilCurrentOptions = {
+  pollIntervalMs: 2_000,
+  timeoutMs: 10 * 60_000,
+  signal: new AbortController().signal,
+} satisfies WaitUntilCurrentOptions;
+
+const setCurrentPromise: Promise<Display> = client.displays.setCurrent(
+  "display_123",
+  "presentation_123",
+);
+const advancePromise: Promise<DisplayAdvanceResult> =
+  client.displays.advance("display_123");
+void advancePromise.then(({ display, changed }) => {
+  const id: string = display.id;
+  const didChange: boolean = changed;
+  void id;
+  void didChange;
+});
+void setCurrentPromise.then(() =>
+  client.displays.waitUntilCurrent(
+    "display_123",
+    "presentation_123",
+    waitUntilCurrentOptions,
+  ),
+);
 
 void client.displays.listQueue("display_123").then((page) => {
   const item = page.items[0];

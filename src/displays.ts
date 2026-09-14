@@ -1,6 +1,15 @@
 import type { AnalysisMode } from "./analyses.js";
-import { expectEnum } from "./contents.js";
-import { ConfigurationError, InvalidResponseError } from "./errors.js";
+import {
+  delay,
+  expectEnum,
+  throwIfAborted,
+  validateWaitNumber,
+} from "./contents.js";
+import {
+  ConfigurationError,
+  InvalidResponseError,
+  OperationTimeoutError,
+} from "./errors.js";
 import {
   formatQuery,
   parseContentRefs,
@@ -93,6 +102,20 @@ export interface CurrentPresentationOptions {
   format?: PresentationImageFormat;
 }
 
+export interface DisplayAdvanceResult {
+  display: Display;
+  /** `false` when the queue was empty and nothing changed. */
+  changed: boolean;
+}
+
+export interface WaitUntilCurrentOptions {
+  /** Defaults to 1,000 ms. */
+  pollIntervalMs?: number;
+  /** Defaults to 120,000 ms. */
+  timeoutMs?: number;
+  signal?: AbortSignal;
+}
+
 export class DisplaysResource {
   readonly #transport: ResourceTransport;
 
@@ -153,6 +176,104 @@ export class DisplaysResource {
       return null;
     }
     return parsePresentation(expectRecord(response.presentation));
+  }
+
+  /**
+   * Put a specific Presentation on the panel. It must be a Display
+   * Presentation of this user's, already delivered to this Display and
+   * rendered; an `expired` one can be reactivated, which is how "go back to
+   * the previous image" works. Anything else is
+   * `409 presentation_not_deliverable`.
+   *
+   * The Presentation that was on the panel becomes `expired`; it does not go
+   * back into the queue. The switch lands on `pendingPresentationId`;
+   * `currentPresentationId` follows once the panel confirms, which for an
+   * offline panel happens at its next sync. Use `waitUntilCurrent()` to wait
+   * for that. Consumes no AI or push quota.
+   */
+  async setCurrent(displayId: string, presentationId: string): Promise<Display> {
+    const id = encodePathSegment(displayId, "displayId");
+    const response = expectRecord(
+      await this.#transport.request(`${SDK_API_PREFIX}/displays/${id}/current`, {
+        method: "POST",
+        json: { presentationId: requireId(presentationId, "presentationId") },
+      }),
+    );
+    return parseDisplay(expectRecord(response.display));
+  }
+
+  /**
+   * Rotate to the next queued Presentation, highest priority first and oldest
+   * first within a priority. `changed` is `false` when the queue was empty,
+   * which is a normal `200` and changes nothing. Otherwise the effect matches
+   * `setCurrent()`: the old image expires, the new one lands on
+   * `pendingPresentationId`, and no quota is consumed.
+   */
+  async advance(displayId: string): Promise<DisplayAdvanceResult> {
+    const id = encodePathSegment(displayId, "displayId");
+    const response = expectRecord(
+      await this.#transport.request(`${SDK_API_PREFIX}/displays/${id}/advance`, {
+        method: "POST",
+      }),
+    );
+    return {
+      display: parseDisplay(expectRecord(response.display)),
+      changed: expectBoolean(response, "changed"),
+    };
+  }
+
+  /**
+   * Poll until the Display reports `presentationId` as its confirmed current
+   * Presentation. `setCurrent()` / `advance()` only move
+   * `pendingPresentationId`; the panel confirms later, and an offline panel
+   * confirms when it next syncs.
+   *
+   * Throws `OperationTimeoutError` on timeout. That does not cancel the
+   * switch: the panel still shows the Presentation once it syncs.
+   */
+  async waitUntilCurrent(
+    displayId: string,
+    presentationId: string,
+    options: WaitUntilCurrentOptions = {},
+  ): Promise<Display> {
+    encodePathSegment(displayId, "displayId");
+    const wanted = requireId(presentationId, "presentationId");
+    const pollIntervalMs = validateWaitNumber(
+      options.pollIntervalMs, 1_000, 100, 60_000, "pollIntervalMs",
+    );
+    const timeoutMs = validateWaitNumber(
+      options.timeoutMs, 120_000, 1, 30 * 60_000, "timeoutMs",
+    );
+    const abortMessage = "Waiting for the Display to switch was aborted.";
+    const startedAt = Date.now();
+
+    while (true) {
+      throwIfAborted(options.signal, abortMessage);
+      const display = await this.retrieve(displayId);
+      if (display.currentPresentationId === wanted) {
+        return display;
+      }
+
+      const elapsed = Date.now() - startedAt;
+      if (elapsed >= timeoutMs) {
+        throw new OperationTimeoutError(
+          `Display ${display.id} did not confirm Presentation ${wanted} within ${timeoutMs} ms. The switch is still pending.`,
+          {
+            details: {
+              displayId: display.id,
+              presentationId: wanted,
+              pendingPresentationId: display.pendingPresentationId,
+              timeoutMs,
+            },
+          },
+        );
+      }
+      await delay(
+        Math.min(pollIntervalMs, timeoutMs - elapsed),
+        options.signal,
+        abortMessage,
+      );
+    }
   }
 }
 
@@ -219,6 +340,13 @@ function parseQueueItem(record: Record<string, unknown>): DisplayQueueItem {
     createdAt: expectString(record, "createdAt"),
     updatedAt: expectString(record, "updatedAt"),
   };
+}
+
+function requireId(value: string, name: string): string {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new ConfigurationError(`${name} must be a non-empty string.`);
+  }
+  return value.trim();
 }
 
 function normalizeTimestamp(
