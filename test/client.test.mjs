@@ -4,6 +4,7 @@ import {
   ApiError,
   BrowserEnvironmentError,
   ConfigurationError,
+  ConflictError,
   Inklet,
   InvalidResponseError,
   InvalidSecretKeyError,
@@ -253,6 +254,54 @@ describe("Inklet error classification", () => {
       });
       return true;
     });
+  });
+
+  it("keeps the backend code on a 409 so conflicts can be told apart", async () => {
+    const cases = [
+      {
+        code: "presentation_not_deliverable",
+        message: "That Presentation cannot be shown on this Display.",
+        details: {
+          presentationId: "presentation_123",
+          displayId: "display_123",
+          reason: "not_rendered",
+        },
+      },
+      {
+        code: "analysis_in_progress",
+        message: "Too many Analyses are already queued.",
+        details: { queued: 5 },
+      },
+      {
+        code: "asset_not_uploaded",
+        message: "An Asset has not finished uploading.",
+        details: { assetIndex: 0 },
+      },
+    ];
+
+    for (const error of cases) {
+      const client = clientReturning(409, { error }, { "x-request-id": "req_conflict" });
+      await assert.rejects(client.request("/api/sdk/v1/probe"), (thrown) => {
+        assert.ok(thrown instanceof ConflictError);
+        assert.equal(thrown.code, error.code);
+        assert.equal(thrown.status, 409);
+        assert.equal(thrown.message, error.message);
+        assert.equal(thrown.requestId, "req_conflict");
+        assert.deepEqual(thrown.details, error.details);
+        return true;
+      });
+    }
+  });
+
+  it("falls back to the generic conflict code when the backend sends none", async () => {
+    await assert.rejects(
+      clientReturning(409, { error: { message: "Conflict" } }).request("/probe"),
+      (thrown) => {
+        assert.ok(thrown instanceof ConflictError);
+        assert.equal(thrown.code, "conflict");
+        return true;
+      },
+    );
   });
 
   it("preserves request IDs for other server errors", async () => {

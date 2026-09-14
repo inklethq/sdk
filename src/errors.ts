@@ -231,9 +231,12 @@ export class AnalysisFailedError extends InkletError {
 }
 
 /**
- * An Analysis completed but produced no Presentation. This is a normal
- * outcome for history-driven analyses; it is an error only for callers that
- * required exactly one Presentation, such as `presentations.waitUntilReady`.
+ * An Analysis completed but produced no Presentation. Only possible for an
+ * Analysis that named no `contentIds`: once Contents are named, the backend
+ * either covers them or fails the Analysis with `no_presentable_content`.
+ * This is a normal outcome for history-driven analyses; it is an error only
+ * for callers that required exactly one Presentation, such as
+ * `presentations.waitUntilReady`.
  */
 export class NoChangeError extends InkletError {
   readonly analysisId: string;

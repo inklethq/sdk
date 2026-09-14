@@ -54,9 +54,17 @@ export interface Content {
   state: ContentState;
   assets: readonly ContentAsset[];
   failedAssetIndexes: readonly number[];
-  /** Every Analysis that referenced this Content, oldest first. */
+  /**
+   * Every Analysis that listed this Content in contentIds, oldest first.
+   * An Analysis that only picked it up from history as context is not
+   * counted.
+   */
   analysisIds: readonly string[];
-  /** Union of Presentations produced by those Analyses, oldest first. */
+  /**
+   * Presentations that include this Content as an input, oldest first. When
+   * an Analysis splits its Contents across several Presentations, only the
+   * ones actually containing this Content appear here.
+   */
   presentationIds: readonly string[];
   failure: PresentationProblem | null;
   createdAt: string;
@@ -226,6 +234,14 @@ export class ContentsResource {
     return parsePage(response, parseContent);
   }
 
+  /**
+   * Issue fresh upload tickets for Assets whose tickets expired or whose
+   * upload failed. This also accepts a `failed` Content: a Content the
+   * backend failed because its upload window closed
+   * (`failure.code = "upload_expired"`) goes back to `pending` once new
+   * tickets are issued, so missing the window once is not permanent. A
+   * `ready` Content keeps its state.
+   */
   async refreshUploadTickets(
     contentId: string,
     assetIndexes: readonly number[],

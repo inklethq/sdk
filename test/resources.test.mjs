@@ -701,6 +701,28 @@ describe("SDK v1 Analysis", () => {
     });
   });
 
+  it("surfaces no_presentable_content through the failure details", async () => {
+    const client = new Inklet({
+      pat: PAT,
+      fetch: async () => json(analysisFixture({
+        state: "failed",
+        failure: {
+          code: "no_presentable_content",
+          message: "The agent could not use the Contents that were named.",
+          stage: "planning",
+          retryable: true,
+          assetIndex: null,
+        },
+      })),
+    });
+    await assert.rejects(client.analyses.wait(ANALYSIS_ID), (error) => {
+      assert.ok(error instanceof AnalysisFailedError);
+      assert.equal(error.details.backendCode, "no_presentable_content");
+      assert.equal(error.details.retryable, true);
+      return true;
+    });
+  });
+
   it("lists Analyses with filters", async () => {
     const client = new Inklet({
       pat: PAT,

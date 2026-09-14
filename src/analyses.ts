@@ -125,6 +125,7 @@ export interface CreateAnalysisRequest extends Omit<AnalyzeInput, "idempotencyKe
 }
 
 export interface ListAnalysesOptions {
+  /** Only Analyses that listed this Content in contentIds (role "input"). */
   contentId?: string;
   state?: AnalysisState;
   trigger?: AnalysisTrigger;
@@ -135,7 +136,7 @@ export interface ListAnalysesOptions {
 export interface WaitForAnalysisOptions {
   /** Defaults to 1,000 ms. */
   pollIntervalMs?: number;
-  /** Defaults to 120,000 ms. */
+  /** Defaults to 120,000 ms. Raise it for queued history Analyses. */
   timeoutMs?: number;
   signal?: AbortSignal;
 }
@@ -149,7 +150,18 @@ export class AnalysesResource {
     this.#transport = transport;
   }
 
-  /** Run the agent over the given Contents and/or the user's history. */
+  /**
+   * Run the agent over the given Contents and/or the user's history.
+   *
+   * Naming `contentIds` rules out `no_change`: every Content named appears in
+   * at least one Presentation, or the Analysis fails with
+   * `no_presentable_content`. `no_change` is only reachable when no
+   * `contentIds` are given.
+   *
+   * `context: "history"` Analyses run one at a time per user, so this one may
+   * sit in `queued` for a while rather than being rejected. Only a user over
+   * the backend's queue limit gets `409 analysis_in_progress`.
+   */
   async analyze(input: AnalyzeInput = {}): Promise<Analysis> {
     if (!input || typeof input !== "object") {
       throw new ConfigurationError("analyze requires an input object.");
@@ -229,8 +241,17 @@ export class AnalysesResource {
 
   /**
    * Poll until the Analysis is `completed` and return it. A `failed` Analysis
-   * throws `AnalysisFailedError`. `no_change` is a normal completion; check
+   * throws `AnalysisFailedError`; `failure.code` is on
+   * `error.details.backendCode`, for example `no_presentable_content` when the
+   * agent could not use the Contents that were named. `no_change` is a normal
+   * completion and only possible when no `contentIds` were given; check
    * `outcome` on the result.
+   *
+   * `timeoutMs` defaults to 120,000 ms, which suits a `submitted` Analysis.
+   * `context: "history"` and `trigger: "scheduled"` Analyses queue behind the
+   * user's other history Analyses and can stay `queued` far longer, so raise
+   * it for those, e.g. `wait(analysis, { timeoutMs: 15 * 60_000 })`. A timeout
+   * does not cancel the Analysis: `analyses.retrieve()` still returns it later.
    */
   async wait(
     analysisOrId: Analysis | string,
