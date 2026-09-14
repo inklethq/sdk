@@ -89,6 +89,19 @@ export {
 } from "./analyses.js";
 
 export {
+  type AnalysisArchive,
+  type AnalysisEvent,
+  type AnalysisEventDetail,
+  type AnalysisEventDetailLevel,
+  type AnalysisEventLevel,
+  type AnalysisEventPage,
+  type AnalysisEventSource,
+  type ListAnalysisEventsOptions,
+  type TimelineOptions,
+  type WatchAnalysisOptions,
+} from "./events.js";
+
+export {
   DisplaysResource,
   type CurrentPresentationOptions,
   type Display,

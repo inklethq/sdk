@@ -4,9 +4,17 @@ import {
   NoChangeError,
   SubscriptionRequiredError,
   type Analysis,
+  type AnalysisArchive,
+  type AnalysisEvent,
+  type AnalysisEventLevel,
+  type AnalysisEventPage,
+  type AnalysisEventSource,
   type AnalysisScope,
   type AnalysisScopeInput,
   type AnalyzeInput,
+  type ListAnalysisEventsOptions,
+  type TimelineOptions,
+  type WatchAnalysisOptions,
   type AutoPushInput,
   type Content,
   type Display,
@@ -139,6 +147,65 @@ void client.displays.listQueue("display_123").then((page) => {
 void client.presentations.render("presentation_123", {
   preset: "macos-widget-medium",
 });
+const listEventsOptions = {
+  after: 12,
+  limit: 200,
+  detail: "full",
+} satisfies ListAnalysisEventsOptions;
+
+const watchOptions = {
+  after: 12,
+  signal: new AbortController().signal,
+  pollIntervalMs: 1_000,
+  reconnectDelayMs: 500,
+} satisfies WatchAnalysisOptions;
+
+const timelineOptions = {
+  detail: "full",
+  pageSize: 100,
+} satisfies TimelineOptions;
+
+const eventPagePromise: Promise<AnalysisEventPage> = client.analyses.listEvents(
+  "analysis_123",
+  listEventsOptions,
+);
+void eventPagePromise.then((page) => {
+  const nextAfter: number | null = page.nextAfter;
+  const state: "queued" | "running" | "completed" | "failed" = page.state;
+  void nextAfter;
+  void state;
+});
+
+const liveEvents: AsyncIterable<AnalysisEvent> = client.analyses.watch(
+  "analysis_123",
+  watchOptions,
+);
+void (async () => {
+  for await (const event of liveEvents) {
+    const level: AnalysisEventLevel = event.level;
+    const source: AnalysisEventSource = event.source;
+    const type: string = event.type;
+    const summary: string = event.summary;
+    const data: Record<string, unknown> = event.data;
+    const output: string | undefined = event.detail?.output;
+    void level;
+    void source;
+    void type;
+    void summary;
+    void data;
+    void output;
+  }
+  for await (const event of client.analyses.timeline(
+    "analysis_123",
+    timelineOptions,
+  )) {
+    void event.seq;
+  }
+  const archive: AnalysisArchive = await client.analyses.archive("analysis_123");
+  void archive.url;
+  void archive.expiresAt;
+})();
+
 void displayPromise;
 void currentPromise;
 void contentPromise;

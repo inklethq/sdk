@@ -15,6 +15,18 @@ import {
   InvalidResponseError,
   OperationTimeoutError,
 } from "./errors.js";
+import {
+  analysisEventTimeline,
+  listAnalysisEvents,
+  retrieveAnalysisArchive,
+  watchAnalysisEvents,
+  type AnalysisArchive,
+  type AnalysisEvent,
+  type AnalysisEventPage,
+  type ListAnalysisEventsOptions,
+  type TimelineOptions,
+  type WatchAnalysisOptions,
+} from "./events.js";
 import type { PresentationProblem } from "./presentations.js";
 import {
   SDK_API_PREFIX,
@@ -305,6 +317,76 @@ export class AnalysesResource {
       );
       analysis = undefined;
     }
+  }
+
+  /**
+   * Read one page of the Analysis event stream, oldest first.
+   *
+   * Pass the previous page's `nextAfter` as `after` to continue. Use
+   * `timeline()` when you want every event rather than one page.
+   */
+  async listEvents(
+    analysisId: string,
+    options: ListAnalysisEventsOptions = {},
+  ): Promise<AnalysisEventPage> {
+    return listAnalysisEvents(this.#transport, analysisId, options);
+  }
+
+  /**
+   * Follow an Analysis live and yield events as the agent produces them.
+   *
+   * The SDK reads the server-sent event stream and falls back to polling
+   * `listEvents()` when the response is not `text/event-stream`, which is what
+   * a proxy that cannot carry streaming responses returns. A dropped
+   * connection is resumed from the last `seq` (up to five attempts with
+   * exponential back-off), so events are not lost across a reconnect, and
+   * iteration ends once the Analysis reaches `completed` or `failed`.
+   *
+   * Events carry `summary` only. For tool inputs and outputs, read
+   * `timeline({ detail: "full" })` after the Analysis has finished.
+   *
+   * ```ts
+   * for await (const event of inklet.analyses.watch(analysis.id)) {
+   *   console.log(event.summary);
+   * }
+   * ```
+   */
+  watch(
+    analysisId: string,
+    options: WatchAnalysisOptions = {},
+  ): AsyncIterable<AnalysisEvent> {
+    return watchAnalysisEvents(this.#transport, analysisId, options);
+  }
+
+  /**
+   * Iterate every event of an Analysis, paging automatically.
+   *
+   * `detail: "full"` adds the verbatim agent payloads and requires a terminal
+   * Analysis: this checks the state first and throws `ConflictError` with
+   * `code: "analysis_in_progress"` rather than starting a walk the backend
+   * would reject part way through.
+   */
+  timeline(
+    analysisId: string,
+    options: TimelineOptions = {},
+  ): AsyncIterable<AnalysisEvent> {
+    return analysisEventTimeline(
+      this.#transport,
+      analysisId,
+      options,
+      async () => (await this.retrieve(analysisId)).state,
+    );
+  }
+
+  /**
+   * Get a short-lived download URL for the Analysis run archive.
+   *
+   * Throws `NotFoundError` with `code: "archive_not_found"` when the Analysis
+   * has no archive, for example while it is still running or after retention
+   * has expired.
+   */
+  async archive(analysisId: string): Promise<AnalysisArchive> {
+    return retrieveAnalysisArchive(this.#transport, analysisId);
   }
 }
 
