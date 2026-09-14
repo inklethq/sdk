@@ -113,6 +113,14 @@ export interface Presentation {
    */
   mode: AnalysisMode;
   state: PresentationState;
+  /**
+   * What this Presentation is called in a Display's history: the plan's own
+   * title, else the template's title parameter, else the first input
+   * Content's title or an excerpt of its text, else the Analysis title or the
+   * template name. `null` only for Presentations stored before titles were
+   * resolved at acceptance.
+   */
+  title: string | null;
   output: PresentationOutput | null;
   scene: PresentationScene | null;
   renditions: readonly PresentationRendition[];
@@ -399,6 +407,7 @@ export function parsePresentation(
     contentIds: parseContentRefs(record.contentIds),
     mode: expectEnum(record.mode, ["ai", "direct"] as const),
     state,
+    title: nullableString(record.title),
     output: parsePresentationOutput(record.output),
     scene: parsePresentationScene(record.scene),
     renditions,

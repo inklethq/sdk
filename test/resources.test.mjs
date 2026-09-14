@@ -67,10 +67,9 @@ describe("SDK v1 resource reads", () => {
       { id: CONTENT_ID, role: "input" },
       { id: OTHER_CONTENT_ID, role: "context" },
     ]);
-    assert.equal(
-      (await client.displays.current(DISPLAY_ID, { format: "png" })).id,
-      PRESENTATION_ID,
-    );
+    const current = await client.displays.current(DISPLAY_ID, { format: "png" });
+    assert.equal(current.id, PRESENTATION_ID);
+    assert.equal(current.title, "周五下午 3 点和王老师开会");
     assert.equal(
       (
         await client.presentations.retrieve(PRESENTATION_ID, {
@@ -79,6 +78,12 @@ describe("SDK v1 resource reads", () => {
       ).image.format,
       "raw2",
     );
+  });
+
+  it("reads a Presentation stored before titles existed as title: null", async () => {
+    const { title: _dropped, ...untitled } = presentationFixture();
+    const client = new Inklet({ pat: PAT, fetch: async () => json(untitled) });
+    assert.equal((await client.presentations.retrieve(PRESENTATION_ID)).title, null);
   });
 
   it("returns null when a Display has no confirmed Presentation", async () => {
@@ -1182,6 +1187,7 @@ function presentationFixture() {
     ],
     mode: "ai",
     state: "confirmed",
+    title: "周五下午 3 点和王老师开会",
     image: {
       url: "https://cdn.example/image.png?signature=redacted",
       format: "png",

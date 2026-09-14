@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Add `Presentation.title`, the name a Display's history shows for the card.
+  The backend resolves it when it accepts a plan (the plan's title, else the
+  template's title parameter, else the first input Content's title or text
+  excerpt, else the Analysis title or template name), so it is `null` only for
+  Presentations stored before that.
 - Add `PresentationPage.historyWindowStart`, which reports the plan's history
   depth on `presentations.list()`. The Free plan sees the last 7 days of
   Display Presentations and Pro sees all of them; the backend clamps rather
