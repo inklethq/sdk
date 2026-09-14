@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- Add `PresentationPage.historyWindowStart`, which reports the plan's history
+  depth on `presentations.list()`. The Free plan sees the last 7 days of
+  Display Presentations and Pro sees all of them; the backend clamps rather
+  than refusing, so older rows are omitted from `items` and the RFC3339 UTC
+  floor is disclosed here. It is `null` when nothing was clipped, including a
+  `scope: "generated"` read, which has no Display half. `items`, `nextCursor`,
+  and `hasMore` are unchanged, and `displays.listQueue()`,
+  `displays.current()`, and `presentations.retrieve()` are unaffected.
+- Document that `Analysis.scope.sinceAt` may be later than the requested
+  `scope.since`: the same plan history depth clamps a `context: "history"`
+  window at creation instead of rejecting it, and `sinceAt` is the window the
+  agent actually explored.
 - Add `presentations.list({ displayId })`, which filters the list to
   Presentations targeted at one Display and is how a Display's history is read:
   `displays.listQueue()` only covers what has not been shown yet. It combines

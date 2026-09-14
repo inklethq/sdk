@@ -107,6 +107,28 @@ half just the same, and `scope: "generated"` contradicts the filter and is an
 belonging to someone else, returns an empty page; an id that is not well formed
 is rejected the same way as a contradictory scope.
 
+How far back that history reaches depends on the plan: the Free plan sees the
+last 7 days of Display Presentations, Pro sees all of them. The list clamps
+rather than failing — older rows are left out — and the page says where the
+floor is in `historyWindowStart`, so you can show the user what they are
+looking at:
+
+```ts
+const history = await inklet.presentations.list({ displayId: display.id });
+
+if (history.historyWindowStart) {
+  const since = new Date(history.historyWindowStart);
+  console.log(`Showing history since ${since.toLocaleDateString()}`);
+}
+```
+
+`historyWindowStart` is an RFC3339 UTC timestamp, or `null` when nothing was
+clipped — an unlimited plan, or a `scope: "generated"` read, which has no
+Display half. Nothing is deleted: the hidden Presentations come back on the
+same call after an upgrade. `displays.listQueue()`, `displays.current()`, and
+`presentations.retrieve()` are unaffected, so a Presentation whose id you
+already hold stays readable either way.
+
 ## Upload, then analyze
 
 Uploading and analyzing are separate steps. A Content is just the submitted
@@ -142,6 +164,10 @@ if (done.outcome === "presentations") {
 | `scope` | `{ since: "72h" }` look-back window for `history`; the backend picks a default when omitted. It resolves `since` to an absolute `sinceAt` at creation time, echoed back on `analysis.scope`, so a queued Analysis reads the window it was created with. |
 | `target` | Omit for agent-selected Displays, `{ displayId }` / `{ displayIds }` to pin, or `{ output }` for a software-only Scene/PNG. |
 | `intent`, `title` | Hints for the agent; `title` overrides the generated title. |
+
+The same plan history depth applies to `context: "history"`, so an earlier
+`scope.since` than the plan allows is clamped at creation instead of rejected —
+read `analysis.scope.sinceAt` for the window the agent actually explored.
 
 ```ts
 // Combine new Content with earlier uploads.

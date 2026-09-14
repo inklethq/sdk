@@ -68,8 +68,15 @@ export interface AnalysisScope extends AnalysisScopeInput {
   /**
    * Absolute start of the window, resolved from `since` when the Analysis was
    * created, so a queued Analysis reads the same history it would have read
-   * immediately. The window is `[sinceAt, createdAt]`. `null` when the backend
-   * did not report it.
+   * immediately. The window is `[sinceAt, createdAt]`.
+   *
+   * This is the window the agent actually explored, and it may be later than
+   * the `since` you asked for: the plan caps how far back history reaches (the
+   * Free plan 7 days, Pro all of it), and an earlier `scope.since` is clamped
+   * to that floor at creation rather than rejected. Compare it against your own
+   * `since` when you need to tell the user how much was really covered.
+   *
+   * `null` when the backend did not report it.
    */
   sinceAt: string | null;
 }

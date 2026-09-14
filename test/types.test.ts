@@ -27,6 +27,7 @@ import {
   type Presentation,
   type PresentationContentRef,
   type PresentationContentRole,
+  type PresentationPage,
   type WaitUntilCurrentOptions,
 } from "@inklethq/sdk";
 
@@ -155,11 +156,16 @@ const displayHistoryOptions = {
   limit: 20,
 } satisfies ListPresentationsOptions;
 
-void client.presentations.list(displayHistoryOptions).then((page) => {
+const displayHistoryPage: Promise<PresentationPage> =
+  client.presentations.list(displayHistoryOptions);
+
+void displayHistoryPage.then((page) => {
   const displayIds: readonly (string | null)[] = page.items.map(
     (item) => item.displayId,
   );
+  const historyWindowStart: string | null = page.historyWindowStart;
   void displayIds;
+  void historyWindowStart;
 });
 const listEventsOptions = {
   after: 12,

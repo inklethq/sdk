@@ -127,6 +127,24 @@ export interface PresentationPage {
   items: readonly Presentation[];
   nextCursor: string | null;
   hasMore: boolean;
+  /**
+   * How far back this list is allowed to see, as an RFC3339 UTC timestamp.
+   *
+   * The plan caps the Display history a list may reach: the Free plan sees the
+   * last 7 days, Pro sees all of it. The backend clamps instead of refusing, so
+   * Display Presentations created before this instant are simply left out of
+   * `items` and paging past it ends the list. Read it as the floor of what you
+   * are showing, not as an error; nothing is deleted, and after an upgrade the
+   * same call returns the older rows untouched.
+   *
+   * `null` when nothing was clipped, which covers both an unlimited plan and a
+   * scope with no Display half (`scope: "generated"`). Only the Display half is
+   * capped, so `scope: "display"` and `scope: "all"` can report a floor.
+   * `displays.listQueue()`, `displays.current()`, and
+   * `presentations.retrieve()` are not affected: a Presentation you already
+   * hold the id for stays readable.
+   */
+  historyWindowStart: string | null;
 }
 
 export interface RetrievePresentationOptions {
@@ -306,7 +324,11 @@ export class PresentationsResource {
     const response = await this.#transport.request(
       `${SDK_API_PREFIX}/presentations${suffix}`,
     );
-    return parsePage(response, parsePresentation);
+    const record = expectRecord(response);
+    return {
+      ...parsePage(record, parsePresentation),
+      historyWindowStart: nullableString(record.historyWindowStart),
+    };
   }
 
   /**

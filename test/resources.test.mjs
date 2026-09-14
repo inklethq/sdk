@@ -154,6 +154,78 @@ describe("SDK v1 resource reads", () => {
     assert.equal(query.has("scope"), false);
   });
 
+  it("reads the plan history window off the Presentation page", async () => {
+    const bodies = [
+      // A Free-plan read: the page discloses the 7-day floor it clamped to.
+      {
+        items: [presentationFixture()],
+        nextCursor: null,
+        hasMore: false,
+        historyWindowStart: "2026-08-05T00:00:00Z",
+      },
+      // Nothing clipped: an unlimited plan, or a scope with no Display half.
+      {
+        items: [presentationFixture()],
+        nextCursor: null,
+        hasMore: false,
+        historyWindowStart: null,
+      },
+      // A backend that does not send the field at all reads as no floor, the
+      // same way nextCursor and other nullable strings tolerate omission.
+      {
+        items: [presentationFixture()],
+        nextCursor: null,
+        hasMore: false,
+      },
+    ];
+
+    const seen = [];
+    for (const body of bodies) {
+      const client = new Inklet({ pat: PAT, fetch: async () => json(body) });
+      const page = await client.presentations.list({ scope: "display" });
+      // The rest of the page shape is untouched.
+      assert.equal(page.items.length, 1);
+      assert.equal(page.nextCursor, null);
+      assert.equal(page.hasMore, false);
+      seen.push(page.historyWindowStart);
+    }
+
+    assert.deepEqual(seen, ["2026-08-05T00:00:00Z", null, null]);
+  });
+
+  it("keeps the page's required fields strict alongside the window", async () => {
+    const client = new Inklet({
+      pat: PAT,
+      fetch: async () =>
+        json({
+          items: [presentationFixture()],
+          nextCursor: null,
+          historyWindowStart: "2026-08-05T00:00:00Z",
+        }),
+    });
+    await assert.rejects(
+      client.presentations.list({ scope: "display" }),
+      InvalidResponseError,
+    );
+  });
+
+  it("does not put a history window on the Display queue page", async () => {
+    const client = new Inklet({
+      pat: PAT,
+      fetch: async () =>
+        json({
+          items: [queueItemFixture()],
+          nextCursor: null,
+          hasMore: false,
+          // The queue is not clamped, so even a stray field is not surfaced.
+          historyWindowStart: "2026-08-05T00:00:00Z",
+        }),
+    });
+    const page = await client.displays.listQueue(DISPLAY_ID);
+    assert.equal("historyWindowStart" in page, false);
+    assert.equal(page.items.length, 1);
+  });
+
   it("rejects an empty displayId filter before requesting", async () => {
     let requested = false;
     const client = new Inklet({
