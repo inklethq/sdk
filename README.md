@@ -78,6 +78,36 @@ if (current) {
 confirmed Presentation. To change what is on the panel, see
 [Switch the image on a Display](#switch-the-image-on-a-display).
 
+`listQueue()` only covers what has not been shown yet. For one Display's
+history, filter the Presentation list by that Display:
+
+```ts
+// Everything this panel has shown or is about to show, newest first.
+const history = await inklet.presentations.list({
+  scope: "display",
+  displayId: display.id,
+  limit: 20,
+});
+
+// Narrow it to one state: what is on the panel now, or what it showed before.
+const live = await inklet.presentations.list({
+  scope: "display",
+  displayId: display.id,
+  state: "published",
+});
+const previous = await inklet.presentations.list({
+  scope: "display",
+  displayId: display.id,
+  state: "expired",
+});
+```
+
+`displayId` combines with `scope`, `state`, `cursor`, and `limit`. `scope`
+still defaults to `generated`, which no Display Presentation is in, so pass
+`scope: "display"` (or `"all"`) alongside it. An unknown Display id, or one
+belonging to someone else, returns an empty page; an id that is not well formed
+is an `ApiError` with `code: "invalid_request"`.
+
 ## Upload, then analyze
 
 Uploading and analyzing are separate steps. A Content is just the submitted
@@ -262,8 +292,9 @@ normal result, not an error.
 
 The Presentation that was on the panel becomes `expired` rather than going back
 into the queue, so `displays.listQueue()` always means "not shown yet". To go
-back to a previous image, find it in `presentations.list()` and call
-`setCurrent()` with it: an `expired` Presentation can be reactivated.
+back to a previous image, find it in
+`presentations.list({ scope: "display", displayId, state: "expired" })` and
+call `setCurrent()` with it: an `expired` Presentation can be reactivated.
 
 `waitUntilCurrent()` polls until the panel confirms. An offline panel confirms
 at its next sync, so a timeout here throws `OperationTimeoutError` without

@@ -89,6 +89,84 @@ describe("SDK v1 resource reads", () => {
     assert.equal(await client.displays.current(DISPLAY_ID), null);
   });
 
+  it("lists Presentations for one Display, and omits displayId when unset", async () => {
+    const queries = [];
+    const client = new Inklet({
+      pat: PAT,
+      fetch: async (input) => {
+        const url = new URL(input);
+        assert.equal(url.pathname, "/api/sdk/v1/presentations");
+        queries.push(url.search);
+        return json({
+          items: [presentationFixture()],
+          nextCursor: null,
+          hasMore: false,
+        });
+      },
+    });
+
+    const filtered = await client.presentations.list({
+      scope: "display",
+      displayId: DISPLAY_ID,
+    });
+    assert.equal(filtered.items[0].displayId, DISPLAY_ID);
+    assert.equal(filtered.items[0].kind, "display");
+
+    await client.presentations.list({ scope: "display" });
+    await client.presentations.list();
+
+    const [withDisplay, withoutDisplay, bare] = queries.map(
+      (search) => new URLSearchParams(search),
+    );
+    assert.equal(withDisplay.get("displayId"), DISPLAY_ID);
+    assert.equal(withDisplay.get("scope"), "display");
+    assert.equal(withoutDisplay.has("displayId"), false);
+    assert.equal(bare.has("displayId"), false);
+    assert.equal(queries[2], "");
+  });
+
+  it("composes displayId with state and the paging cursor", async () => {
+    let search;
+    const client = new Inklet({
+      pat: PAT,
+      fetch: async (input) => {
+        search = new URL(input).search;
+        return json({ items: [], nextCursor: null, hasMore: false });
+      },
+    });
+
+    await client.presentations.list({
+      scope: "display",
+      displayId: DISPLAY_ID,
+      state: "expired",
+      cursor: "cursor-page-2",
+      limit: 10,
+    });
+
+    const query = new URLSearchParams(search);
+    assert.equal(query.get("displayId"), DISPLAY_ID);
+    assert.equal(query.get("state"), "expired");
+    assert.equal(query.get("cursor"), "cursor-page-2");
+    assert.equal(query.get("limit"), "10");
+    assert.equal(query.get("scope"), "display");
+  });
+
+  it("rejects an empty displayId filter before requesting", async () => {
+    let requested = false;
+    const client = new Inklet({
+      pat: PAT,
+      fetch: async () => {
+        requested = true;
+        return json({ items: [], nextCursor: null, hasMore: false });
+      },
+    });
+    await assert.rejects(
+      client.presentations.list({ scope: "display", displayId: "  " }),
+      ConfigurationError,
+    );
+    assert.equal(requested, false);
+  });
+
   it("rejects an inverted Display queue time range before requesting", async () => {
     let requested = false;
     const client = new Inklet({

@@ -141,6 +141,14 @@ export class DisplaysResource {
     return parseDisplay(expectRecord(response));
   }
 
+  /**
+   * Read what is waiting to go on the panel, oldest first within a priority.
+   *
+   * The queue only ever holds `queued` Presentations: once one is delivered it
+   * leaves the queue, and the image it replaces expires rather than going back
+   * in. For the Display's history, including the `published`, `confirmed`, and
+   * `expired` ones, use `presentations.list({ displayId })`.
+   */
   async listQueue(
     displayId: string,
     options: ListDisplayQueueOptions = {},

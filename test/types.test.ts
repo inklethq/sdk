@@ -23,6 +23,7 @@ import {
   type HardcodePushInput,
   type InkletClientOptions,
   type InkletRequestOptions,
+  type ListPresentationsOptions,
   type Presentation,
   type PresentationContentRef,
   type PresentationContentRole,
@@ -146,6 +147,20 @@ void client.displays.listQueue("display_123").then((page) => {
 });
 void client.presentations.render("presentation_123", {
   preset: "macos-widget-medium",
+});
+
+const displayHistoryOptions = {
+  scope: "display",
+  displayId: "display_123",
+  state: "expired",
+  limit: 20,
+} satisfies ListPresentationsOptions;
+
+void client.presentations.list(displayHistoryOptions).then((page) => {
+  const displayIds: readonly (string | null)[] = page.items.map(
+    (item) => item.displayId,
+  );
+  void displayIds;
 });
 const listEventsOptions = {
   after: 12,

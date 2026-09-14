@@ -137,6 +137,19 @@ export interface RetrievePresentationOptions {
 export interface ListPresentationsOptions {
   scope?: "generated" | "display" | "all";
   state?: PresentationState;
+  /**
+   * Keep only Presentations targeted at this Display, which is how you read
+   * one panel's history: `displays.listQueue()` covers what has not been shown
+   * yet, while this also returns the `published`, `confirmed`, and `expired`
+   * ones. Combines with `scope`, `state`, `cursor`, and `limit`; `scope` still
+   * defaults to `generated`, which holds no Display Presentations, so pass
+   * `scope: "display"` (or `"all"`) alongside it.
+   *
+   * A Display id that is not a well-formed id is rejected by the backend with
+   * `code: "invalid_request"`; one that does not exist or belongs to someone
+   * else simply returns an empty page.
+   */
+  displayId?: string;
   cursor?: string;
   limit?: number;
 }
@@ -282,6 +295,9 @@ export class PresentationsResource {
         throw new ConfigurationError("state is not a valid Presentation state.");
       }
       query.set("state", options.state);
+    }
+    if (options.displayId !== undefined) {
+      query.set("displayId", encodePathSegment(options.displayId, "displayId"));
     }
     const suffix = query.size === 0 ? "" : `?${query.toString()}`;
     const response = await this.#transport.request(
