@@ -74,8 +74,9 @@ if (current) {
 }
 ```
 
-`displays.current()` is read-only and returns `null` when the Display has no
-confirmed Presentation.
+`displays.current()` is a read and returns `null` when the Display has no
+confirmed Presentation. To change what is on the panel, see
+[Switch the image on a Display](#switch-the-image-on-a-display).
 
 ## Upload, then analyze
 
@@ -107,9 +108,9 @@ if (done.outcome === "presentations") {
 
 | Option | Meaning |
 | --- | --- |
-| `contentIds` | Contents to analyze. Omit to analyze recent history only. |
+| `contentIds` | Contents to analyze. Omit to analyze recent history only. When you pass Contents, the Analysis never completes as `no_change`: every Content you name appears in at least one Presentation, or the Analysis fails with `no_presentable_content`. |
 | `context` | `submitted` (default with `contentIds`): only those Contents. `history`: the agent may also read the user's earlier Contents. |
-| `scope` | `{ since: "72h" }` look-back window for `history`; the backend picks a default when omitted. |
+| `scope` | `{ since: "72h" }` look-back window for `history`; the backend picks a default when omitted. It resolves `since` to an absolute `sinceAt` at creation time, echoed back on `analysis.scope`, so a queued Analysis reads the window it was created with. |
 | `target` | Omit for agent-selected Displays, `{ displayId }` / `{ displayIds }` to pin, or `{ output }` for a software-only Scene/PNG. |
 | `intent`, `title` | Hints for the agent; `title` overrides the generated title. |
 
@@ -128,12 +129,56 @@ const { content: img } = await inklet.contents.upload({ assets: [inklet.assets.i
 await inklet.direct({ contentId: img.id, target: { displayIds: [displayId] } });
 ```
 
-A `no_change` outcome is a normal completion: the agent decided nothing was
-worth showing. `analyses.wait()` throws `AnalysisFailedError` only when the
-Analysis itself failed.
+A `no_change` outcome is a normal completion and is only possible when you
+pass no `contentIds`: the agent looked at recent history and decided nothing
+was worth showing. `analyses.wait()` throws `AnalysisFailedError` only when the
+Analysis itself failed; the backend code is on `error.details.backendCode`.
+
+`analyses.wait()` and `presentations.waitUntilReady()` default to
+`timeoutMs: 120_000`, which suits a `submitted` Analysis. Analyses with
+`context: "history"` run one at a time per user, and scheduled ones queue the
+same way, so they can stay `queued` much longer:
+
+```ts
+const done = await inklet.analyses.wait(analysis, { timeoutMs: 15 * 60_000 });
+```
+
+A timeout throws `OperationTimeoutError` but does not cancel the Analysis;
+`inklet.analyses.retrieve(analysis.id)` still returns it once it finishes.
 
 Scheduled analyses created by Inklet appear in
 `inklet.analyses.list({ trigger: "scheduled" })`.
+
+## Switch the image on a Display
+
+Picking what is on the panel needs no AI and no new Content. Neither call
+consumes AI or push quota.
+
+```ts
+// The panel confirms asynchronously: setCurrent moves pendingPresentationId,
+// and currentPresentationId follows once the panel has fetched the image.
+await inklet.displays.setCurrent(displayId, presentationId);
+await inklet.displays.waitUntilCurrent(displayId, presentationId, {
+  timeoutMs: 10 * 60_000,
+});
+
+const { changed } = await inklet.displays.advance(displayId);
+```
+
+`setCurrent()` accepts a Presentation of yours that has already been delivered
+to this Display and finished rendering; anything else is a `ConflictError` with
+`code: "presentation_not_deliverable"`. `advance()` moves to the next queued
+Presentation and returns `changed: false` when the queue is empty, which is a
+normal result, not an error.
+
+The Presentation that was on the panel becomes `expired` rather than going back
+into the queue, so `displays.listQueue()` always means "not shown yet". To go
+back to a previous image, find it in `presentations.list()` and call
+`setCurrent()` with it: an `expired` Presentation can be reactivated.
+
+`waitUntilCurrent()` polls until the panel confirms. An offline panel confirms
+at its next sync, so a timeout here throws `OperationTimeoutError` without
+cancelling the switch.
 
 ## Generate a Presentation without a Display
 
@@ -153,9 +198,10 @@ console.log(presentation.scene?.data);
 console.log(presentation.renditions[0]?.url);
 ```
 
-`waitUntilReady()` throws `NoChangeError` if the Analysis completed without a
-Presentation. A stored Scene can be rendered at another size without rerunning
-AI:
+An `output` target always produces exactly one Presentation, so
+`waitUntilReady()` returns it; it throws `NoChangeError` only when handed an
+Analysis that named no `contentIds`. A stored Scene can be rendered at another
+size without rerunning AI:
 
 ```ts
 const rendition = await inklet.presentations.render(presentation.id, {

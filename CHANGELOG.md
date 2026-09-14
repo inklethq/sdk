@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+- **Breaking:** `Presentation.contentIds` and `DisplayQueueItem.contentIds` are
+  ordered `{ id, role }` refs instead of bare UUIDs, where `role` is `input`
+  (named by the Analysis) or `context` (retrieved from history by the agent).
+  Add `PresentationContentRef` and `PresentationContentRole`.
+- **Breaking:** `Presentation.mode` and `DisplayQueueItem.mode` are now the
+  `AnalysisMode` values `ai` / `direct` and are required. The retired
+  `auto` / `manual` / `hardcode` values and the empty-string default are
+  rejected. Target, context, and trigger are read from the Analysis through
+  `Presentation.analysisId`.
+- Add `displays.setCurrent()`, `displays.advance()`, and
+  `displays.waitUntilCurrent()` for manual switching, with
+  `DisplayAdvanceResult` and `WaitUntilCurrentOptions`. Both writes land on
+  `pendingPresentationId` until the panel confirms, replace the previous image
+  with an `expired` one rather than requeueing it, and consume no AI or push
+  quota. A Presentation that cannot be shown returns `ConflictError` with
+  `code: "presentation_not_deliverable"`.
+- Split Analysis scope: requests take `AnalysisScopeInput { since }` and only
+  `since` is sent; responses carry `AnalysisScope { since, sinceAt }`, the
+  absolute window the backend resolved when the Analysis was created.
+- Document that naming `contentIds` rules out `no_change` (the Analysis fails
+  with `no_presentable_content` instead), that `context: "history"` Analyses
+  queue rather than conflict so `wait({ timeoutMs })` should be raised for
+  them, and that a Content failed with `upload_expired` can be re-ticketed back
+  to `pending`.
 - Decouple upload from processing: `contents.upload()` stores Content without
   running AI; `inklet.analyze()` / `inklet.direct()` start an Analysis over
   `contentIds` and/or the user's history and produce Presentations.
