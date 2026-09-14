@@ -5,9 +5,11 @@
 - Add `presentations.list({ displayId })`, which filters the list to
   Presentations targeted at one Display and is how a Display's history is read:
   `displays.listQueue()` only covers what has not been shown yet. It combines
-  with `scope`, `state`, `cursor`, and `limit`; `scope` still defaults to
-  `generated`, so pass `scope: "display"` (or `"all"`) alongside it. An unknown
-  or foreign Display id returns an empty page.
+  with `state`, `cursor`, and `limit`. `scope` is optional alongside it and
+  defaults to `display`; `scope: "all"` narrows to the Display half just the
+  same, while `scope: "generated"` contradicts the filter and is rejected with
+  `code: "invalid_request"`. An unknown or foreign Display id returns an empty
+  page.
 - Add the Analysis event stream: `analyses.watch()` follows a running Analysis
   live and yields `AnalysisEvent`s as the agent works, `analyses.listEvents()`
   reads one page, `analyses.timeline()` pages through every event, and

@@ -105,24 +105,28 @@ describe("SDK v1 resource reads", () => {
       },
     });
 
-    const filtered = await client.presentations.list({
-      scope: "display",
-      displayId: DISPLAY_ID,
-    });
+    const filtered = await client.presentations.list({ displayId: DISPLAY_ID });
     assert.equal(filtered.items[0].displayId, DISPLAY_ID);
     assert.equal(filtered.items[0].kind, "display");
 
+    await client.presentations.list({ scope: "display", displayId: DISPLAY_ID });
     await client.presentations.list({ scope: "display" });
     await client.presentations.list();
 
-    const [withDisplay, withoutDisplay, bare] = queries.map(
+    const [alone, explicit, withoutDisplay, bare] = queries.map(
       (search) => new URLSearchParams(search),
     );
-    assert.equal(withDisplay.get("displayId"), DISPLAY_ID);
-    assert.equal(withDisplay.get("scope"), "display");
+    // displayId alone means scope=display on the backend, so the SDK sends no
+    // scope of its own and lets that default stand.
+    assert.equal(alone.get("displayId"), DISPLAY_ID);
+    assert.equal(alone.has("scope"), false);
+    assert.equal(queries[0], `?displayId=${DISPLAY_ID}`);
+    // An explicit scope is still passed through untouched.
+    assert.equal(explicit.get("displayId"), DISPLAY_ID);
+    assert.equal(explicit.get("scope"), "display");
     assert.equal(withoutDisplay.has("displayId"), false);
     assert.equal(bare.has("displayId"), false);
-    assert.equal(queries[2], "");
+    assert.equal(queries[3], "");
   });
 
   it("composes displayId with state and the paging cursor", async () => {
@@ -136,7 +140,6 @@ describe("SDK v1 resource reads", () => {
     });
 
     await client.presentations.list({
-      scope: "display",
       displayId: DISPLAY_ID,
       state: "expired",
       cursor: "cursor-page-2",
@@ -148,7 +151,7 @@ describe("SDK v1 resource reads", () => {
     assert.equal(query.get("state"), "expired");
     assert.equal(query.get("cursor"), "cursor-page-2");
     assert.equal(query.get("limit"), "10");
-    assert.equal(query.get("scope"), "display");
+    assert.equal(query.has("scope"), false);
   });
 
   it("rejects an empty displayId filter before requesting", async () => {
@@ -161,7 +164,7 @@ describe("SDK v1 resource reads", () => {
       },
     });
     await assert.rejects(
-      client.presentations.list({ scope: "display", displayId: "  " }),
+      client.presentations.list({ displayId: "  " }),
       ConfigurationError,
     );
     assert.equal(requested, false);

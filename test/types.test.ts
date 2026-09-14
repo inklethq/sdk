@@ -150,7 +150,6 @@ void client.presentations.render("presentation_123", {
 });
 
 const displayHistoryOptions = {
-  scope: "display",
   displayId: "display_123",
   state: "expired",
   limit: 20,

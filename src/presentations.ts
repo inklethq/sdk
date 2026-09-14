@@ -141,13 +141,16 @@ export interface ListPresentationsOptions {
    * Keep only Presentations targeted at this Display, which is how you read
    * one panel's history: `displays.listQueue()` covers what has not been shown
    * yet, while this also returns the `published`, `confirmed`, and `expired`
-   * ones. Combines with `scope`, `state`, `cursor`, and `limit`; `scope` still
-   * defaults to `generated`, which holds no Display Presentations, so pass
-   * `scope: "display"` (or `"all"`) alongside it.
+   * ones. Combines with `state`, `cursor`, and `limit`.
    *
-   * A Display id that is not a well-formed id is rejected by the backend with
-   * `code: "invalid_request"`; one that does not exist or belongs to someone
-   * else simply returns an empty page.
+   * `scope` is optional here and defaults to `display`, since that is the only
+   * scope a Display filter can mean. `scope: "all"` narrows to the Display half
+   * just the same, and `scope: "generated"` contradicts the filter and is
+   * rejected with `code: "invalid_request"`.
+   *
+   * A Display id that is not a well-formed id is rejected the same way; one
+   * that does not exist or belongs to someone else simply returns an empty
+   * page.
    */
   displayId?: string;
   cursor?: string;
