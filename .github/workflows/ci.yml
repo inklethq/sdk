@@ -9,6 +9,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   verify:
     name: Node.js ${{ matrix.node-version }}
@@ -16,7 +20,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # package.json declares "node": ">=20", so the oldest supported
+        # release is covered alongside current LTS and current.
         node-version:
+          - "20"
           - "22"
           - "24"
 
@@ -38,3 +45,23 @@ jobs:
 
       - name: Verify package contents
         run: npm run pack:check
+
+  audit:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+
+      # Advisory only: a new advisory should surface here without blocking an
+      # unrelated pull request. Triage it in a follow-up instead.
+      - name: Report known advisories
+        continue-on-error: true
+        run: npm audit --audit-level=high
