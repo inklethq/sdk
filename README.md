@@ -482,6 +482,27 @@ const rendition = await inklet.presentations.render(presentation.id, {
 `default`, `macos-widget-small`, `macos-widget-medium`, and
 `macos-widget-large`.
 
+Each rendition carries its own `state` — `preparing`, `ready`, or `failed` —
+alongside the `colorMode` it was rendered in. Rendering is asynchronous, so a
+new geometry comes back `preparing` with `url: null`; read the Presentation
+again until it is `ready`. A `failed` rendition carries the reason in its own
+`failure` and changes nothing else: the Scene stays readable, sibling
+renditions keep their URLs, and asking for the same geometry again returns the
+same rendition rather than starting a second render.
+
+```ts
+for (const rendition of presentation.renditions) {
+  if (rendition.url !== null) {
+    console.log(rendition.width, rendition.url, "expires", rendition.expiresAt);
+  }
+}
+```
+
+`url` and `expiresAt` are `null` together, so branch on `url` rather than on
+`state`: they are also absent on the rare `ready` rendition the backend could
+not sign. A `url` is short-lived — read the Presentation again for a fresh one;
+that never re-renders.
+
 A generated Presentation is never queued, published, confirmed, or expired —
 it is `preparing`, `ready`, or `failed` — so a `scope: "generated"` list, which
 is what a bare `presentations.list()` is, rejects any other `state` with

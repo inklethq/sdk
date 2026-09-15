@@ -1,6 +1,6 @@
 {
   "name": "@inklethq/sdk",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Official JavaScript and TypeScript SDK for Inklet.",
   "license": "UNLICENSED",
   "type": "module",

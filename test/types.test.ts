@@ -45,7 +45,10 @@ import {
   type Presentation,
   type PresentationContentRef,
   type PresentationContentRole,
+  type PresentationColorMode,
   type PresentationPage,
+  type PresentationProblem,
+  type PresentationRenditionState,
   type WaitUntilCurrentOptions,
 } from "@inklethq/sdk";
 
@@ -164,9 +167,20 @@ void client.displays.listQueue("display_123").then((page) => {
   void refs;
   void mode;
 });
-void client.presentations.render("presentation_123", {
-  preset: "macos-widget-medium",
-});
+void client.presentations
+  .render("presentation_123", { preset: "macos-widget-medium" })
+  .then((rendition) => {
+    const state: PresentationRenditionState = rendition.state;
+    const colorMode: PresentationColorMode = rendition.colorMode;
+    const url: string | null = rendition.url;
+    const expiresAt: string | null = rendition.expiresAt;
+    const failure: PresentationProblem | null = rendition.failure;
+    void state;
+    void colorMode;
+    void url;
+    void expiresAt;
+    void failure;
+  });
 
 const displayHistoryOptions = {
   displayId: "display_123",

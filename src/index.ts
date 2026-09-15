@@ -162,6 +162,7 @@ export {
   type PresentationPage,
   type PresentationProblem,
   type PresentationRendition,
+  type PresentationRenditionState,
   type PresentationState,
   type RetrievePresentationOptions,
   type WaitUntilReadyOptions,

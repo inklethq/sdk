@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.2.2
+
+One fix to Presentation rendition parsing. The SDK modelled a rendition as
+always having a URL; the backend has always been able to send one without.
+
+- **Fix:** a rendition whose `url` and `expiresAt` are `null` no longer throws
+  `InvalidResponseError`. The backend sends both as `null` whenever a rendition
+  is `preparing` or `failed`, and rendering is asynchronous — so
+  `presentations.render()` threw on every new geometry, and
+  `presentations.retrieve()` and `presentations.list()` threw for any
+  Presentation holding a rendition that had not landed or had failed.
+- Add `state` (`preparing` | `ready` | `failed`), `colorMode`, and `failure` to
+  `PresentationRendition`. The backend already sent all three; only the type
+  was missing them. `state` is each rendition's own lifecycle — a `failed`
+  rendition leaves its Presentation and its siblings untouched, and `failure`
+  is the only place that reason appears. `colorMode` is part of a rendition's
+  identity: the backend deduplicates on format, geometry, and colour mode
+  together. The new `PresentationRenditionState` type is exported.
+- **Changed types:** `PresentationRendition.url` and `.expiresAt` are now
+  `string | null`. Branch on `url` rather than on `state`: they are `null`
+  together on `preparing` and `failed`, and also on the rare `ready` rendition
+  the backend could not sign, which it reports link-less rather than failing
+  the whole read. Code that read `rendition.url` as a `string` now needs a null
+  check; nothing is removed or renamed.
+
 ## 0.2.1
 
 Three corrections to the Analysis event stream, found while the Portal built

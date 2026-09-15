@@ -80,15 +80,56 @@ export interface PresentationImage {
   updatedAt: string;
 }
 
+/**
+ * Where one rendition is in its own lifecycle, independent of the
+ * Presentation's `state`.
+ *
+ * `preparing`: the render has not landed yet. A state, not an error — read the
+ * Presentation again until it settles.
+ * `ready`: the pixels exist.
+ * `failed`: this geometry could not be produced. The rendition stays readable
+ * and neither the Scene nor any sibling rendition is affected; asking for the
+ * same geometry again returns the same rendition.
+ */
+export type PresentationRenditionState = "preparing" | "ready" | "failed";
+
 export interface PresentationRendition {
   id: string;
   mediaType: "image/png";
   format: "png";
   width: number;
   height: number;
-  url: string;
-  expiresAt: string;
+  /**
+   * Part of this rendition's identity, not just of the request that asked for
+   * it: the backend deduplicates on format, geometry, and colour mode
+   * together, so two renditions of one Presentation can differ by nothing
+   * else.
+   */
+  colorMode: PresentationColorMode;
+  state: PresentationRenditionState;
+  /**
+   * A short-lived signed link to the PNG, minted per response.
+   *
+   * `null` while `state` is `preparing` or `failed` — there is no object to
+   * link to — and also on the rare `ready` rendition the backend could not
+   * sign, which it reports as a link-less rendition rather than failing the
+   * whole read. Always branch on `url`, never on `state` alone. Reading the
+   * Presentation again issues a fresh URL for the same stored PNG; it never
+   * re-renders.
+   */
+  url: string | null;
+  /**
+   * When `url` stops working, not when the render does. `null` exactly when
+   * `url` is.
+   */
+  expiresAt: string | null;
   updatedAt: string;
+  /**
+   * Why this rendition could not be produced. Set only when `state` is
+   * `failed`, and the only place that reason appears — the Presentation's own
+   * `failure` covers Scene generation, not rasterisation.
+   */
+  failure: PresentationProblem | null;
 }
 
 export interface Presentation {
@@ -350,6 +391,10 @@ export class PresentationsResource {
    * Analyses with `context: "history"` or `trigger: "scheduled"` queue behind
    * the user's other history Analyses. Raise `timeoutMs` for those; a timeout
    * does not cancel the Analysis.
+   *
+   * This waits for the Analysis, which settles once the Scene is durable — the
+   * pixels can still be rendering. Check `state` on the Presentation, or on the
+   * rendition you want, before reaching for a `url`.
    */
   async waitUntilReady(
     generationOrAnalysis: PresentationGeneration | Analysis | string,
@@ -371,7 +416,16 @@ export class PresentationsResource {
     return this.retrieve(analysis.presentationIds[0] as string);
   }
 
-  /** Create another PNG rendition from the persisted Scene without rerunning AI. */
+  /**
+   * Create another PNG rendition from the persisted Scene without rerunning
+   * AI.
+   *
+   * The rasterisation is asynchronous, so a geometry the Presentation does not
+   * already have comes back `state: "preparing"` with `url: null`: read the
+   * Presentation again until that rendition is `ready`. A geometry it already
+   * has is returned as it stands — `ready` with a fresh link, or `preparing`
+   * if an earlier call is still rendering it — and starts no second render.
+   */
   async render(
     presentationId: string,
     input: CreatePresentationRenditionInput,
@@ -436,15 +490,29 @@ function parseRendition(record: Record<string, unknown>): PresentationRendition 
   if (width <= 0 || height <= 0) {
     throw new InvalidResponseError();
   }
+  // `url` and `expiresAt` are read as nullable rather than cross-checked
+  // against `state`. The backend documents the pairing, but it also drops the
+  // link from a `ready` rendition it could not sign rather than failing the
+  // read — so insisting on it here would turn a degraded response into a
+  // thrown one, which is the whole bug this parser used to have.
   return {
     id: expectString(record, "id"),
     mediaType: "image/png",
     format: "png",
     width,
     height,
-    url: expectString(record, "url"),
-    expiresAt: expectString(record, "expiresAt"),
+    colorMode: expectEnum(
+      record.colorMode,
+      ["color", "grayscale", "monochrome"] as const,
+    ),
+    state: expectEnum(
+      record.state,
+      ["preparing", "ready", "failed"] as const,
+    ),
+    url: nullableString(record.url),
+    expiresAt: nullableString(record.expiresAt),
     updatedAt: expectString(record, "updatedAt"),
+    failure: parseProblem(nullableRecord(record.failure ?? null)),
   };
 }
 

@@ -1067,6 +1067,92 @@ describe("SDK v1 targetless Presentation workflow", () => {
       formats: ["png"],
     });
     assert.equal(rendition.mediaType, "image/png");
+    assert.equal(rendition.state, "ready");
+    assert.equal(rendition.colorMode, "color");
+    assert.equal(
+      rendition.url,
+      "https://cdn.example/generated.png?signature=redacted",
+    );
+    assert.equal(rendition.expiresAt, "2026-08-12T10:15:00Z");
+    assert.equal(rendition.failure, null);
+  });
+
+  it("returns a preparing rendition with no URL instead of throwing", async () => {
+    const client = new Inklet({
+      pat: PAT,
+      fetch: async () =>
+        json(renditionFixture({ state: "preparing" }), 202),
+    });
+
+    const rendition = await client.presentations.render(PRESENTATION_ID, {
+      viewport: { width: 720, height: 340 },
+    });
+    assert.equal(rendition.state, "preparing");
+    assert.equal(rendition.url, null);
+    assert.equal(rendition.expiresAt, null);
+    assert.equal(rendition.failure, null);
+    assert.equal(rendition.colorMode, "color");
+    assert.equal(rendition.width, 360);
+  });
+
+  it("reads a failed rendition with its own failure", async () => {
+    const failure = {
+      code: "render_failed",
+      message: "The renderer ran out of memory.",
+      stage: "render",
+      retryable: true,
+      assetIndex: null,
+    };
+    const client = new Inklet({
+      pat: PAT,
+      fetch: async () =>
+        json(generatedPresentationFixture({
+          renditions: [renditionFixture({ state: "failed", failure })],
+        })),
+    });
+
+    const presentation = await client.presentations.retrieve(PRESENTATION_ID);
+    const rendition = presentation.renditions[0];
+    assert.equal(rendition.state, "failed");
+    assert.equal(rendition.url, null);
+    assert.equal(rendition.expiresAt, null);
+    assert.deepEqual(rendition.failure, failure);
+    // A failed rendition does not fail the Presentation it belongs to.
+    assert.equal(presentation.state, "ready");
+    assert.equal(presentation.failure, null);
+  });
+
+  it("keeps a ready rendition the backend could not sign", async () => {
+    const client = new Inklet({
+      pat: PAT,
+      fetch: async () =>
+        json(generatedPresentationFixture({
+          renditions: [{
+            ...renditionFixture(),
+            url: null,
+            expiresAt: null,
+          }],
+        })),
+    });
+
+    const rendition =
+      (await client.presentations.retrieve(PRESENTATION_ID)).renditions[0];
+    assert.equal(rendition.state, "ready");
+    assert.equal(rendition.url, null);
+    assert.equal(rendition.expiresAt, null);
+  });
+
+  it("rejects a rendition with an unknown state", async () => {
+    const client = new Inklet({
+      pat: PAT,
+      fetch: async () => json(renditionFixture({ state: "rendering" })),
+    });
+    await assert.rejects(
+      client.presentations.render(PRESENTATION_ID, {
+        viewport: { width: 360, height: 170 },
+      }),
+      InvalidResponseError,
+    );
   });
 
   it("rejects ambiguous output profiles before requesting", async () => {
@@ -1211,7 +1297,29 @@ function outputFixture() {
   };
 }
 
-function generatedPresentationFixture() {
+// The backend always sends every rendition key, `null` where a state has no
+// value for it, so the fixture does too: the shape of a `preparing` rendition
+// is the thing these tests are about.
+function renditionFixture({ state = "ready", failure = null } = {}) {
+  const ready = state === "ready";
+  return {
+    id: "01942345-6789-7abc-def0-123456789abc",
+    mediaType: "image/png",
+    format: "png",
+    width: 360,
+    height: 170,
+    colorMode: "color",
+    state,
+    url: ready ? "https://cdn.example/generated.png?signature=redacted" : null,
+    expiresAt: ready ? "2026-08-12T10:15:00Z" : null,
+    updatedAt: "2026-08-12T10:02:00Z",
+    failure,
+  };
+}
+
+function generatedPresentationFixture({
+  renditions = [renditionFixture()],
+} = {}) {
   return {
     id: PRESENTATION_ID,
     displayId: null,
@@ -1239,16 +1347,7 @@ function generatedPresentationFixture() {
         }],
       },
     },
-    renditions: [{
-      id: "01942345-6789-7abc-def0-123456789abc",
-      mediaType: "image/png",
-      format: "png",
-      width: 360,
-      height: 170,
-      url: "https://cdn.example/generated.png?signature=redacted",
-      expiresAt: "2026-08-12T10:15:00Z",
-      updatedAt: "2026-08-12T10:02:00Z",
-    }],
+    renditions,
     image: null,
     failure: null,
     createdAt: "2026-08-12T10:00:00Z",
