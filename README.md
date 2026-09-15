@@ -204,34 +204,93 @@ A timeout throws `OperationTimeoutError` but does not cancel the Analysis;
 Scheduled analyses created by Inklet appear in
 `inklet.analyses.list({ trigger: "scheduled" })`.
 
-## Watch the agent work in real time
+## Follow an Analysis
 
-An Analysis publishes an ordered event stream: what the agent was given, which
-tools it called, what it planned, and how the result was rendered and
+An Analysis publishes an ordered event stream: what the agent was given, what
+it is working on, what it planned, and how the result was rendered and
 delivered. `watch()` follows it live and ends on its own once the Analysis is
 `completed` or `failed`.
 
 ```ts
+import { describeEvent } from "@inklethq/sdk";
+
 const analysis = await inklet.analyze({ contentIds: [content.id] });
 
 for await (const ev of inklet.analyses.watch(analysis.id)) {
-  console.log(ev.summary);
+  console.log(describeEvent(ev));
 }
 ```
 
-Every event carries `seq` (monotonic, use it to resume), `at`, `attempt`,
-`source` (`agent` or `backend`), `type`, `level`, a ready-to-display `summary`,
-and structured `data`. Switch on the types you care about and fall back to
-`summary` for the rest — `type` is an open set, and a type this SDK has never
-seen still parses:
+The stream is a progress report, not the run's log. It answers *where is this
+now*, and it is a closed set of fifteen types:
+
+| Stage | Types |
+| --- | --- |
+| Accepted | `analysis.created` · `analysis.dispatched` · `analysis.leased` |
+| Working | `context.materialized` · `agent.activity` |
+| Planning | `plan.submitted` · `plan.rejected` · `plan.accepted` |
+| Result | `render.finished` · `render.failed` · `delivery.published` · `delivery.confirmed` · `delivery.failed` |
+| Finished | `analysis.completed` · `analysis.failed` |
+
+The agent's own working log — each turn, each tool call and its arguments and
+output, the sentences a rejected plan was faulted for — **is not part of the
+public API** and is not readable at any depth. Those are the run's
+implementation: they name our workspace paths and change whenever the agent
+does, and a UI built on them would break on a release that changed nothing you
+can see.
+
+Every event carries `seq`, `at`, `attempt`, `source` (`agent` or `backend`),
+`type`, `level`, a ready-to-display English `summary`, and structured `data`.
+
+`seq` is monotonic and is what you pass back as `after` to resume — but it is
+**not contiguous**. The sequence is shared with the run's internal events,
+which you never receive, so a public stream skips numbers. Treat it as an
+ordering and a resume token, never as a count or an index.
+
+`data` is typed per event type. `type` itself is open — a type this SDK has
+never seen parses as `Record<string, unknown>` rather than failing the stream —
+so reach for the payload through `isAnalysisEvent()`, which narrows both:
 
 ```ts
+import { isAnalysisEvent } from "@inklethq/sdk";
+
 for await (const ev of inklet.analyses.watch(analysis.id, { after: lastSeq, signal })) {
-  if (ev.type === "tool.called") console.log("tool:", ev.data.name);
+  if (isAnalysisEvent(ev, "plan.accepted")) console.log(ev.data.presentationIds);
   else if (ev.level === "error") console.error(ev.summary);
   lastSeq = ev.seq;
 }
 ```
+
+### `agent.activity`
+
+A run of related agent steps arrives as one activity rather than one event per
+step: `{ activityId, kind, state, steps, stats }`, where `kind` is
+`reading_brief`, `reading_notes`, `checking_display`, `choosing_layout`,
+`submitting_plan`, `retrying`, or `other`, and `state` is `active`, `done`, or
+`failed`. `stats` counts only what applies — `notesRead`, `layoutsSeen`,
+`chosen`, `failedSteps`, `deniedSteps` — and omits the rest rather than
+sending zeros.
+
+The same `activityId` arrives several times as the activity runs: throttled
+`active` updates, then a final `done` or `failed`. **Upsert by `activityId`**
+instead of appending, or hand the list to `mergeActivities()`, which keeps each
+activity at the position it first appeared and replaces it with its latest
+state:
+
+```ts
+import { describeEvent, mergeActivities } from "@inklethq/sdk";
+
+const steps = mergeActivities(events).map(describeEvent);
+// "Ready · 3 Contents, 1 Display, 9 layouts"
+// "Read 4 notes"
+// "Chose Daily Summary"
+// "Submitted the plan · 2 actions"
+```
+
+`describeEvent()` turns `type` and `data` into one English line, falling back
+to the backend's `summary`. It is pure and has no locale option.
+
+### Transport
 
 `watch()` handles the transport for you:
 
@@ -245,25 +304,19 @@ for await (const ev of inklet.analyses.watch(analysis.id, { after: lastSeq, sign
 - `signal` aborts the iteration with `OperationAbortedError`. Breaking out of
   the `for await` loop closes the connection.
 
-Live events carry `summary` only. Once the Analysis has finished, read the
-whole run — including verbatim tool inputs and outputs — with `timeline()`,
-which pages through every event for you:
+`timeline()` reads the same events after the fact, paging for you, and works on
+a running Analysis as well as a finished one:
 
 ```ts
 await inklet.analyses.wait(analysis);
 
-for await (const ev of inklet.analyses.timeline(analysis.id, { detail: "full" })) {
-  if (ev.type === "tool.finished") {
-    console.log(ev.detail?.isError ? "failed" : "ok", ev.detail?.output);
-  }
+for await (const ev of inklet.analyses.timeline(analysis.id)) {
+  if (ev.level !== "info") console.warn(ev.summary);
 }
 ```
 
-`detail: "full"` is only available on a `completed` or `failed` Analysis; asked
-for earlier it throws `ConflictError` with `code: "analysis_in_progress"`.
-`timeline()` checks the state before it starts rather than failing part way
-through. For manual paging, `listEvents(id, { after, limit, detail })` returns
-one page plus `nextAfter`, `hasMore`, and the current `state`.
+For manual paging, `listEvents(id, { after, limit })` returns one page plus
+`nextAfter`, `hasMore`, and the current `state`.
 
 `analyses.archive(id)` returns a short-lived `{ url, expiresAt }` for the full
 run archive, or throws `NotFoundError` with `code: "archive_not_found"` when
@@ -274,6 +327,23 @@ there is none.
 This SDK is server-only: a personal access token must never reach a browser, so
 run `watch()` on your server and relay events to the client over your own
 channel (SSE, WebSocket, or whatever the Portal already uses).
+
+Merge on whichever side owns the list. On the browser side that is an upsert
+keyed by `activityId`, so a late `active` update never appends a second row:
+
+```ts
+function apply(rows: Map<string, string>, ev: AnalysisEvent) {
+  const key = isAnalysisEvent(ev, "agent.activity") ? ev.data.activityId : String(ev.seq);
+  rows.set(key, describeEvent(ev));
+}
+```
+
+If the client instead re-reads the timeline on reconnect, do the same in one
+call before rendering:
+
+```ts
+const rows = mergeActivities(events).map((ev) => ({ seq: ev.seq, text: describeEvent(ev) }));
+```
 
 In browser code, read that relay with `fetch` plus `ReadableStream`, not
 `EventSource`. `EventSource` cannot set request headers — no `Authorization`,

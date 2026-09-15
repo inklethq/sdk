@@ -2,12 +2,13 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   ConfigurationError,
-  ConflictError,
   Inklet,
   InvalidResponseError,
   NetworkError,
   NotFoundError,
   OperationAbortedError,
+  describeEvent,
+  mergeActivities,
 } from "../dist/esm/index.js";
 
 const PAT = "il_pat_test_abcdefghijklmnopqrstuvwxyz";
@@ -27,14 +28,15 @@ describe("SDK v1 Analysis event stream", () => {
         return sse([
           "id: 1\r\nevent: analysis.created\r\ndata: ",
           `${JSON.stringify(eventFixture(1, { type: "analysis.created", source: "backend" }))}\r\n\r\n`,
-          ": ping\n\nid: 2\nevent: tool.call",
-          "ed\ndata: {\"seq\": 2,\n",
+          ": ping\n\nid: 4\nevent: agent.activi",
+          "ty\ndata: {\"seq\": 4,\n",
           // A single data payload spread over several `data:` lines.
           'data:  "at": "2026-08-12T10:00:02Z", "attempt": 1, "source": "agent",\n',
-          'data:  "type": "tool.called", "level": "info", "summary": "调用搜索",\n',
-          'data:  "data": {"tool": "search"}, "detail": null}\n\n: ping\n\n',
-          "id: 3\nevent: assistant.note\ndata: ",
-          `${JSON.stringify(eventFixture(3, { type: "assistant.note" }))}\n`,
+          'data:  "type": "agent.activity", "level": "info", "summary": "Reading notes",\n',
+          'data:  "data": {"activityId": "a1", "kind": "reading_notes",\n',
+          'data:  "state": "active", "steps": 3, "stats": {"notesRead": 2}}}\n\n: ping\n\n',
+          "id: 9\nevent: plan.submitted\ndata: ",
+          `${JSON.stringify(eventFixture(9, { type: "plan.submitted", data: { round: 1, outcome: "presentations", actions: 2 } }))}\n`,
           "\nevent: end\ndata: {\"state\": \"completed\"}\n\n",
         ]);
       },
@@ -54,16 +56,26 @@ describe("SDK v1 Analysis event stream", () => {
 
     assert.deepEqual(
       events.map((event) => event.seq),
-      [1, 2, 3],
+      [1, 4, 9],
     );
     assert.deepEqual(
       events.map((event) => event.type),
-      ["analysis.created", "tool.called", "assistant.note"],
+      ["analysis.created", "agent.activity", "plan.submitted"],
     );
     assert.equal(events[0].source, "backend");
-    assert.equal(events[1].summary, "调用搜索");
-    assert.deepEqual(events[1].data, { tool: "search" });
-    assert.equal(events[1].detail, null);
+    assert.equal(events[1].summary, "Reading notes");
+    assert.deepEqual(events[1].data, {
+      activityId: "a1",
+      kind: "reading_notes",
+      state: "active",
+      steps: 3,
+      stats: { notesRead: 2 },
+    });
+    assert.deepEqual(events[2].data, {
+      round: 1,
+      outcome: "presentations",
+      actions: 2,
+    });
   });
 
   it("reconnects from the last seq with Last-Event-ID when the stream drops", async () => {
@@ -92,6 +104,34 @@ describe("SDK v1 Analysis event stream", () => {
     assert.equal(requests.length, 2);
     assert.equal(requests[1].url.searchParams.get("after"), "2");
     assert.equal(requests[1].headers.get("last-event-id"), "2");
+  });
+
+  it("resumes from the last seq seen even though a public stream skips numbers", async () => {
+    // Internal events share the sequence and are never returned, so the public
+    // stream jumps. Nothing may assume 1, 2, 3.
+    const requests = [];
+    const client = new Inklet({
+      pat: PAT,
+      fetch: async (input, init = {}) => {
+        const url = new URL(input);
+        requests.push({ url, headers: new Headers(init.headers) });
+        if (requests.length === 1) {
+          return sse([frame(3), frame(17)]);
+        }
+        return sse([frame(42), "event: end\ndata: {\"state\": \"completed\"}\n\n"]);
+      },
+    });
+
+    const seen = await drain(
+      client.analyses.watch(ANALYSIS_ID, { after: 2, reconnectDelayMs: 10 }),
+    );
+
+    assert.deepEqual(seen, [3, 17, 42]);
+    assert.equal(requests[0].url.searchParams.get("after"), "2");
+    assert.equal(requests[0].headers.get("last-event-id"), "2");
+    // Resumed from 17, the last seq actually delivered, not from 4.
+    assert.equal(requests[1].url.searchParams.get("after"), "17");
+    assert.equal(requests[1].headers.get("last-event-id"), "17");
   });
 
   it("gives up after five reconnect attempts", async () => {
@@ -154,14 +194,14 @@ describe("SDK v1 Analysis event stream", () => {
         pages += 1;
         if (pages === 1) {
           return json({
-            items: [eventFixture(1)],
-            nextAfter: 1,
+            items: [eventFixture(2)],
+            nextAfter: 2,
             hasMore: false,
             state: "running",
           });
         }
         return json({
-          items: [eventFixture(2), eventFixture(3)],
+          items: [eventFixture(11), eventFixture(30)],
           nextAfter: null,
           hasMore: false,
           state: "completed",
@@ -173,11 +213,11 @@ describe("SDK v1 Analysis event stream", () => {
       client.analyses.watch(ANALYSIS_ID, { pollIntervalMs: 100 }),
     );
 
-    assert.deepEqual(events, [1, 2, 3]);
+    assert.deepEqual(events, [2, 11, 30]);
     assert.deepEqual(paths, [
       STREAM_PATH,
       `${EVENTS_PATH}?limit=200`,
-      `${EVENTS_PATH}?after=1&limit=200`,
+      `${EVENTS_PATH}?after=2&limit=200`,
     ]);
   });
 
@@ -250,7 +290,7 @@ describe("SDK v1 Analysis event stream", () => {
 });
 
 describe("SDK v1 Analysis event reads", () => {
-  it("sends after, limit, and detail, and parses a page", async () => {
+  it("sends after and limit, and parses a page", async () => {
     let url;
     const client = new Inklet({
       pat: PAT,
@@ -258,20 +298,17 @@ describe("SDK v1 Analysis event reads", () => {
         url = new URL(input);
         return json({
           items: [
-            eventFixture(4, {
-              type: "tool.finished",
+            eventFixture(12, {
+              type: "plan.rejected",
               level: "warn",
-              detail: {
-                input: { query: "weather" },
-                output: "{\"ok\":false}",
-                isError: true,
-                text: "retrying",
-              },
+              source: "backend",
+              summary: "The plan was sent back.",
+              data: { problems: 3, reason: "layout_mismatch", attempt: 1 },
             }),
           ],
-          nextAfter: 4,
+          nextAfter: 12,
           hasMore: true,
-          state: "completed",
+          state: "running",
         });
       },
     });
@@ -279,69 +316,179 @@ describe("SDK v1 Analysis event reads", () => {
     const page = await client.analyses.listEvents(ANALYSIS_ID, {
       after: 3,
       limit: 200,
-      detail: "full",
     });
 
     assert.equal(url.pathname, EVENTS_PATH);
     assert.equal(url.searchParams.get("after"), "3");
     assert.equal(url.searchParams.get("limit"), "200");
-    assert.equal(url.searchParams.get("detail"), "full");
-    assert.equal(page.nextAfter, 4);
+    assert.equal(url.searchParams.get("detail"), null);
+    assert.equal(page.nextAfter, 12);
     assert.equal(page.hasMore, true);
-    assert.equal(page.state, "completed");
+    assert.equal(page.state, "running");
     assert.equal(page.items[0].level, "warn");
-    assert.deepEqual(page.items[0].detail, {
-      input: { query: "weather" },
-      output: "{\"ok\":false}",
-      isError: true,
-      text: "retrying",
+    assert.deepEqual(page.items[0].data, {
+      problems: 3,
+      reason: "layout_mismatch",
+      attempt: 1,
     });
   });
 
-  it("passes through 409 analysis_in_progress for detail=full", async () => {
+  it("never sends detail, and ignores an event that still carries one", async () => {
+    let search;
     const client = new Inklet({
       pat: PAT,
-      fetch: async () =>
-        json(
-          {
-            error: {
-              code: "analysis_in_progress",
-              message: "Full detail is available once the Analysis finishes.",
-            },
-          },
-          409,
-        ),
+      fetch: async (input) => {
+        search = new URL(input).search;
+        return json({
+          items: [
+            eventFixture(1, {
+              type: "analysis.created",
+              data: {},
+              detail: { input: { path: "in/contents/01/content.md" }, output: "…" },
+            }),
+          ],
+          nextAfter: null,
+          hasMore: false,
+          state: "running",
+        });
+      },
     });
 
-    await assert.rejects(
-      client.analyses.listEvents(ANALYSIS_ID, { detail: "full" }),
-      (error) => {
-        assert.ok(error instanceof ConflictError);
-        assert.equal(error.code, "analysis_in_progress");
-        assert.equal(error.status, 409);
-        return true;
-      },
-    );
+    // `detail` is gone from the options, so it cannot reach the query string
+    // even when a caller passes it; and a server that still sends one is read
+    // without it rather than refused.
+    const page = await client.analyses.listEvents(ANALYSIS_ID, { detail: "full" });
+
+    assert.equal(search, "");
+    assert.equal("detail" in page.items[0], false);
+    assert.deepEqual(page.items[0].data, {});
   });
 
-  it("accepts unknown event types and rejects malformed events", async () => {
-    const page = async (item) => {
-      const client = new Inklet({
-        pat: PAT,
-        fetch: async () =>
-          json({ items: [item], nextAfter: null, hasMore: false, state: "running" }),
-      });
-      return client.analyses.listEvents(ANALYSIS_ID);
-    };
+  it("parses the data of every known public type", async () => {
+    const cases = [
+      [
+        "context.materialized",
+        { contents: 2, history: 5, displays: 1, templates: 9, bytes: 41984, vision: true },
+        { contents: 2, history: 5, displays: 1, templates: 9, bytes: 41984, vision: true },
+      ],
+      [
+        "context.materialized",
+        { contents: 2, history: 0, displays: 1, templates: 9, warnings: 2 },
+        { contents: 2, history: 0, displays: 1, templates: 9, warnings: 2 },
+      ],
+      [
+        "agent.activity",
+        {
+          activityId: "a3",
+          kind: "choosing_layout",
+          state: "done",
+          steps: 6,
+          stats: { layoutsSeen: 4, chosen: "Daily Summary", deniedSteps: 1 },
+        },
+        {
+          activityId: "a3",
+          kind: "choosing_layout",
+          state: "done",
+          steps: 6,
+          stats: { layoutsSeen: 4, deniedSteps: 1, chosen: "Daily Summary" },
+        },
+      ],
+      [
+        // `stats` may be empty, and `chosen` may be an explicit null.
+        "agent.activity",
+        { activityId: "a1", kind: "other", state: "active", steps: 1, stats: { chosen: null } },
+        { activityId: "a1", kind: "other", state: "active", steps: 1, stats: { chosen: null } },
+      ],
+      ["plan.submitted", { round: 1, outcome: "no_change" }, { round: 1, outcome: "no_change" }],
+      [
+        "plan.submitted",
+        { round: 2, outcome: "presentations", actions: 3 },
+        { round: 2, outcome: "presentations", actions: 3 },
+      ],
+      [
+        "plan.rejected",
+        { problems: 2, reason: "content_refs", attempt: 1 },
+        { problems: 2, reason: "content_refs", attempt: 1 },
+      ],
+      [
+        "plan.accepted",
+        { presentationIds: ["p1", "p2"], actions: 2 },
+        { presentationIds: ["p1", "p2"], actions: 2 },
+      ],
+      [
+        "analysis.completed",
+        { outcome: "presentations", presentations: 2 },
+        { outcome: "presentations", presentations: 2 },
+      ],
+      ["analysis.failed", { code: "no_presentable_content" }, { code: "no_presentable_content" }],
+      ["render.finished", { presentationId: "p1" }, { presentationId: "p1" }],
+      ["render.failed", { presentationId: "p1" }, { presentationId: "p1" }],
+      [
+        "delivery.published",
+        { presentationId: "p1", displayId: "d1" },
+        { presentationId: "p1", displayId: "d1" },
+      ],
+      [
+        "delivery.confirmed",
+        { presentationId: "p1", displayId: "d1" },
+        { presentationId: "p1", displayId: "d1" },
+      ],
+      ["delivery.failed", { presentationId: "p1" }, { presentationId: "p1" }],
+    ];
 
-    const forward = await page(
-      eventFixture(1, { type: "kernel.experimental_thing", data: {} }),
+    for (const [type, data, expected] of cases) {
+      const page = await readOne(eventFixture(1, { type, data }));
+      assert.deepEqual(page.items[0].data, expected, type);
+      assert.equal(page.items[0].type, type);
+    }
+  });
+
+  it("keeps fields a known type gained after this SDK shipped", async () => {
+    const page = await readOne(
+      eventFixture(1, {
+        type: "analysis.completed",
+        data: { outcome: "presentations", presentations: 1, turns: 7, inputTokens: 900 },
+      }),
     );
-    assert.equal(forward.items[0].type, "kernel.experimental_thing");
-    assert.deepEqual(forward.items[0].data, {});
+
+    assert.deepEqual(page.items[0].data, {
+      outcome: "presentations",
+      presentations: 1,
+      turns: 7,
+      inputTokens: 900,
+    });
+  });
+
+  it("reads plan.rejected problems as a count even when a list arrives", async () => {
+    const page = await readOne(
+      eventFixture(1, {
+        type: "plan.rejected",
+        data: { problems: ["a", "b", "c"], reason: "schema", attempt: 2 },
+      }),
+    );
+
+    assert.equal(page.items[0].data.problems, 3);
+    assert.equal(page.items[0].data.reason, "schema");
+  });
+
+  it("accepts unknown event types and rejects malformed known ones", async () => {
+    const forward = await readOne(
+      eventFixture(1, { type: "something.new", data: { shape: "unforeseen" } }),
+    );
+    assert.equal(forward.items[0].type, "something.new");
+    assert.deepEqual(forward.items[0].data, { shape: "unforeseen" });
+
+    // An internal type is not expected on a public read, but if one arrives it
+    // is carried rather than refused.
+    const internal = await readOne(
+      eventFixture(1, { type: "tool.called", data: { tool: "read" } }),
+    );
+    assert.deepEqual(internal.items[0].data, { tool: "read" });
 
     // `data` may be omitted entirely; it reads back as an empty object.
-    const sparse = await page(omit(eventFixture(1), "data"));
+    const sparse = await readOne(
+      omit(eventFixture(1, { type: "analysis.created" }), "data"),
+    );
     assert.deepEqual(sparse.items[0].data, {});
 
     for (const broken of [
@@ -354,13 +501,29 @@ describe("SDK v1 Analysis event reads", () => {
       { ...eventFixture(1), level: "debug" },
       { ...eventFixture(1), type: "" },
       { ...eventFixture(1), data: [1, 2] },
-      { ...eventFixture(1), detail: { output: 42 } },
+      // A known type whose own fields are missing or out of range.
+      activity({ activityId: undefined }),
+      activity({ kind: "daydreaming" }),
+      activity({ state: "paused" }),
+      activity({ steps: -1 }),
+      activity({ stats: { notesRead: "many" } }),
+      activity({ stats: { chosen: 7 } }),
+      eventFixture(1, { type: "plan.rejected", data: { problems: 1, attempt: 1 } }),
+      eventFixture(1, {
+        type: "plan.rejected",
+        data: { problems: 1, reason: "vibes", attempt: 1 },
+      }),
+      eventFixture(1, { type: "plan.submitted", data: { outcome: "presentations" } }),
+      eventFixture(1, { type: "analysis.completed", data: { outcome: "maybe" } }),
+      eventFixture(1, { type: "analysis.failed", data: {} }),
+      eventFixture(1, { type: "render.finished", data: {} }),
+      eventFixture(1, { type: "plan.accepted", data: { presentationIds: [1] } }),
     ]) {
-      await assert.rejects(page(broken), InvalidResponseError);
+      await assert.rejects(readOne(broken), InvalidResponseError);
     }
   });
 
-  it("validates after, limit, and detail before requesting", async () => {
+  it("validates after and limit before requesting", async () => {
     let requested = false;
     const client = new Inklet({
       pat: PAT,
@@ -378,10 +541,6 @@ describe("SDK v1 Analysis event reads", () => {
       client.analyses.listEvents(ANALYSIS_ID, { limit: 201 }),
       ConfigurationError,
     );
-    await assert.rejects(
-      client.analyses.listEvents(ANALYSIS_ID, { detail: "everything" }),
-      ConfigurationError,
-    );
     await assert.rejects(client.analyses.listEvents(""), ConfigurationError);
     assert.throws(
       () => client.analyses.watch(ANALYSIS_ID, { pollIntervalMs: 1 }),
@@ -392,7 +551,7 @@ describe("SDK v1 Analysis event reads", () => {
 });
 
 describe("SDK v1 Analysis timeline and archive", () => {
-  it("pages through every event", async () => {
+  it("pages through every event, following gapped sequence numbers", async () => {
     const queries = [];
     const client = new Inklet({
       pat: PAT,
@@ -401,14 +560,14 @@ describe("SDK v1 Analysis timeline and archive", () => {
         queries.push(url.search);
         if (queries.length === 1) {
           return json({
-            items: [eventFixture(1), eventFixture(2)],
-            nextAfter: 2,
+            items: [eventFixture(2), eventFixture(9)],
+            nextAfter: 9,
             hasMore: true,
             state: "completed",
           });
         }
         return json({
-          items: [eventFixture(3)],
+          items: [eventFixture(31)],
           nextAfter: null,
           hasMore: false,
           state: "completed",
@@ -418,63 +577,31 @@ describe("SDK v1 Analysis timeline and archive", () => {
 
     const seen = await drain(client.analyses.timeline(ANALYSIS_ID, { pageSize: 2 }));
 
-    assert.deepEqual(seen, [1, 2, 3]);
-    assert.deepEqual(queries, ["?limit=2&detail=summary", "?after=2&limit=2&detail=summary"]);
+    assert.deepEqual(seen, [2, 9, 31]);
+    assert.deepEqual(queries, ["?limit=2", "?after=9&limit=2"]);
   });
 
-  it("checks the Analysis is terminal before walking with detail=full", async () => {
+  it("never asks the Analysis for its state before walking", async () => {
     const paths = [];
     const client = new Inklet({
       pat: PAT,
       fetch: async (input) => {
-        const url = new URL(input);
-        paths.push(url.pathname);
-        return json(analysisFixture("running"));
-      },
-    });
-
-    await assert.rejects(
-      drain(client.analyses.timeline(ANALYSIS_ID, { detail: "full" })),
-      (error) => {
-        assert.ok(error instanceof ConflictError);
-        assert.equal(error.code, "analysis_in_progress");
-        assert.deepEqual(error.details, { state: "running" });
-        return true;
-      },
-    );
-    // Only the state check ran; no event page was requested.
-    assert.deepEqual(paths, [`/api/sdk/v1/analyses/${ANALYSIS_ID}`]);
-  });
-
-  it("reads full detail once the Analysis is terminal", async () => {
-    const queries = [];
-    const client = new Inklet({
-      pat: PAT,
-      fetch: async (input) => {
-        const url = new URL(input);
-        if (url.pathname === `/api/sdk/v1/analyses/${ANALYSIS_ID}`) {
-          return json(analysisFixture("failed"));
-        }
-        queries.push(url.search);
+        paths.push(new URL(input).pathname);
         return json({
-          items: [eventFixture(1, { detail: { text: "done" } })],
+          items: [eventFixture(1)],
           nextAfter: null,
           hasMore: false,
-          state: "failed",
+          state: "running",
         });
       },
     });
 
-    const events = [];
-    for await (const event of client.analyses.timeline(ANALYSIS_ID, {
-      detail: "full",
-      after: 0,
-    })) {
-      events.push(event);
-    }
-
-    assert.deepEqual(queries, ["?after=0&limit=100&detail=full"]);
-    assert.deepEqual(events[0].detail, { text: "done" });
+    assert.deepEqual(
+      await drain(client.analyses.timeline(ANALYSIS_ID, { after: 0 })),
+      [1],
+    );
+    // A running Analysis is walked straight away: there is no depth to gate.
+    assert.deepEqual(paths, [EVENTS_PATH]);
   });
 
   it("rejects a page that claims hasMore without advancing", async () => {
@@ -530,6 +657,211 @@ describe("SDK v1 Analysis timeline and archive", () => {
   });
 });
 
+describe("mergeActivities", () => {
+  it("collapses each activity to its latest state at its first position", () => {
+    const events = [
+      event(1, "context.materialized"),
+      activityEvent(2, "a1", { kind: "reading_notes", state: "active", steps: 1, stats: { notesRead: 1 } }),
+      activityEvent(3, "a1", { kind: "reading_notes", state: "active", steps: 5, stats: { notesRead: 3 } }),
+      activityEvent(4, "a2", { kind: "choosing_layout", state: "active", steps: 1, stats: { layoutsSeen: 1 } }),
+      activityEvent(5, "a1", { kind: "reading_notes", state: "done", steps: 7, stats: { notesRead: 4 } }),
+      activityEvent(6, "a2", { kind: "choosing_layout", state: "done", steps: 3, stats: { chosen: "Daily Summary" } }),
+      event(7, "plan.submitted"),
+    ];
+
+    const merged = mergeActivities(events);
+
+    assert.deepEqual(
+      merged.map((e) => e.seq),
+      // a1 keeps slot two and a2 slot three, each holding its final update.
+      [1, 5, 6, 7],
+    );
+    assert.equal(merged[1].data.state, "done");
+    assert.equal(merged[1].data.stats.notesRead, 4);
+    assert.equal(merged[2].data.stats.chosen, "Daily Summary");
+  });
+
+  it("passes everything else through and accepts any iterable", () => {
+    const events = [event(1, "analysis.created"), event(2, "analysis.completed")];
+    assert.deepEqual(mergeActivities(events), events);
+    assert.deepEqual(mergeActivities(new Set(events)), events);
+    assert.deepEqual(mergeActivities([]), []);
+
+    // The same activity id in a later attempt still upserts: one row per id.
+    const repeated = mergeActivities([
+      activityEvent(1, "a1", { state: "done" }),
+      activityEvent(2, "a1", { state: "failed" }),
+    ]);
+    assert.equal(repeated.length, 1);
+    assert.equal(repeated[0].data.state, "failed");
+  });
+
+  it("does not mutate the events it was given", () => {
+    const first = activityEvent(1, "a1", { state: "active", steps: 1 });
+    const second = activityEvent(2, "a1", { state: "done", steps: 4 });
+    mergeActivities([first, second]);
+    assert.equal(first.data.state, "active");
+    assert.equal(first.data.steps, 1);
+  });
+});
+
+describe("describeEvent", () => {
+  it("describes every activity kind and state", () => {
+    const cases = [
+      [{ kind: "reading_brief", state: "active" }, "Reading the brief"],
+      [{ kind: "reading_brief", state: "done" }, "Read the brief"],
+      [{ kind: "reading_brief", state: "failed" }, "Could not read the brief"],
+      [{ kind: "reading_notes", state: "done", stats: { notesRead: 3 } }, "Read 3 notes"],
+      [{ kind: "reading_notes", state: "done", stats: { notesRead: 1 } }, "Read 1 note"],
+      [
+        { kind: "reading_notes", state: "active", stats: { notesRead: 2 } },
+        "Reading notes · 2 so far",
+      ],
+      [{ kind: "reading_notes", state: "active" }, "Reading notes"],
+      [{ kind: "reading_notes", state: "failed" }, "Could not read the notes"],
+      [{ kind: "checking_display", state: "active" }, "Checking the Display"],
+      [{ kind: "checking_display", state: "done" }, "Checked the Display"],
+      [{ kind: "checking_display", state: "failed" }, "Could not check the Display"],
+      [
+        { kind: "choosing_layout", state: "active", stats: { layoutsSeen: 2 } },
+        "Looking at layouts · 2 so far",
+      ],
+      [
+        { kind: "choosing_layout", state: "done", stats: { layoutsSeen: 4 } },
+        "Looked at 4 layouts",
+      ],
+      [
+        { kind: "choosing_layout", state: "done", stats: { chosen: "Daily Summary" } },
+        "Chose Daily Summary",
+      ],
+      // A chosen layout outranks the running count while still active.
+      [
+        {
+          kind: "choosing_layout",
+          state: "active",
+          stats: { layoutsSeen: 3, chosen: "Daily Summary" },
+        },
+        "Chose Daily Summary",
+      ],
+      // An explicit null means "looked, has not settled".
+      [
+        { kind: "choosing_layout", state: "active", stats: { chosen: null } },
+        "Looking at layouts",
+      ],
+      [{ kind: "choosing_layout", state: "failed" }, "Could not settle on a layout"],
+      [{ kind: "submitting_plan", state: "active" }, "Submitting the plan"],
+      [{ kind: "submitting_plan", state: "done" }, "Submitted the plan"],
+      [{ kind: "submitting_plan", state: "failed" }, "Could not submit the plan"],
+      [{ kind: "retrying", state: "active" }, "Trying another layout"],
+      [{ kind: "retrying", state: "done" }, "Tried another layout"],
+      [{ kind: "retrying", state: "failed" }, "Could not find another layout"],
+      [{ kind: "other", state: "active" }, "Working"],
+      [{ kind: "other", state: "done" }, "Finished a step"],
+      [{ kind: "other", state: "failed" }, "A step failed"],
+    ];
+
+    for (const [data, expected] of cases) {
+      assert.equal(
+        describeEvent(activityEvent(1, "a1", data)),
+        expected,
+        `${data.kind}/${data.state}`,
+      );
+    }
+  });
+
+  it("describes the rest of the public types", () => {
+    const cases = [
+      [
+        "context.materialized",
+        { contents: 2, history: 0, displays: 1, templates: 9 },
+        "Ready · 2 Contents, 1 Display, 9 layouts",
+      ],
+      [
+        "context.materialized",
+        { contents: 1, history: 4, displays: 2, templates: 9, vision: true, warnings: 2 },
+        "Ready · 1 Content, 4 from history, 2 Displays, 9 layouts, images · 2 gaps",
+      ],
+      ["plan.submitted", { round: 1, outcome: "presentations", actions: 3 }, "Submitted the plan · 3 actions"],
+      [
+        "plan.submitted",
+        { round: 2, outcome: "presentations", actions: 1 },
+        "Submitted the plan (round 2) · 1 action",
+      ],
+      [
+        "plan.submitted",
+        { round: 1, outcome: "no_change" },
+        "Submitted the plan · nothing worth showing",
+      ],
+      ["plan.submitted", { round: 2 }, "Submitted the plan (round 2)"],
+      [
+        "plan.rejected",
+        { problems: 2, reason: "layout_mismatch", attempt: 1 },
+        "Plan sent back · 2 problems with the layout it chose",
+      ],
+      [
+        "plan.rejected",
+        { problems: 1, reason: "other", attempt: 2 },
+        "Plan sent back · 1 problem",
+      ],
+      [
+        "plan.accepted",
+        { presentationIds: ["p1", "p2"], actions: 2 },
+        "Plan accepted · 2 Presentations",
+      ],
+      [
+        "analysis.completed",
+        { outcome: "presentations", presentations: 1 },
+        "Finished · 1 Presentation",
+      ],
+      [
+        "analysis.completed",
+        { outcome: "no_change", presentations: 0 },
+        "Finished · nothing worth showing",
+      ],
+      ["analysis.failed", { code: "no_presentable_content" }, "Failed · no_presentable_content"],
+      ["render.finished", { presentationId: "p1" }, "Rendered p1"],
+      ["render.failed", { presentationId: "p1" }, "Could not render p1"],
+      [
+        "delivery.published",
+        { presentationId: "p1", displayId: "d1" },
+        "Sent p1 to Display d1",
+      ],
+      [
+        "delivery.confirmed",
+        { presentationId: "p1", displayId: "d1" },
+        "Display d1 is showing p1",
+      ],
+      ["delivery.confirmed", { presentationId: "p1" }, "p1 is showing"],
+      [
+        "delivery.failed",
+        { presentationId: "p1", displayId: "d1" },
+        "Could not deliver p1 to Display d1",
+      ],
+    ];
+
+    for (const [type, data, expected] of cases) {
+      assert.equal(describeEvent({ ...event(1, type), data }), expected, type);
+    }
+  });
+
+  it("falls back to the backend summary and stays pure", () => {
+    for (const type of ["analysis.created", "analysis.dispatched", "analysis.leased"]) {
+      assert.equal(describeEvent(event(1, type)), `A ${type} happened.`);
+    }
+    // A type this SDK has never seen, and a delivery with nothing to name.
+    assert.equal(describeEvent(event(1, "something.new")), "A something.new happened.");
+    assert.equal(
+      describeEvent({ ...event(1, "delivery.failed"), data: {} }),
+      "A delivery.failed happened.",
+    );
+
+    const original = activityEvent(1, "a1", { state: "done" });
+    const snapshot = structuredClone(original);
+    describeEvent(original);
+    assert.deepEqual(original, snapshot);
+  });
+});
+
 function json(body, status = 200, headers = {}) {
   return Response.json(body, { status, headers });
 }
@@ -549,9 +881,18 @@ function sse(chunks) {
   );
 }
 
+async function readOne(item) {
+  const client = new Inklet({
+    pat: PAT,
+    fetch: async () =>
+      json({ items: [item], nextAfter: null, hasMore: false, state: "running" }),
+  });
+  return client.analyses.listEvents(ANALYSIS_ID);
+}
+
 function frame(seq, overrides = {}) {
-  const event = eventFixture(seq, overrides);
-  return `id: ${seq}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`;
+  const item = eventFixture(seq, overrides);
+  return `id: ${seq}\nevent: ${item.type}\ndata: ${JSON.stringify(item)}\n\n`;
 }
 
 function eventFixture(seq, overrides = {}) {
@@ -560,34 +901,58 @@ function eventFixture(seq, overrides = {}) {
     at: "2026-08-12T10:00:02Z",
     attempt: 1,
     source: "agent",
-    type: "tool.called",
+    type: "agent.activity",
     level: "info",
-    summary: `第 ${seq} 步`,
-    data: { tool: "search" },
-    detail: null,
+    summary: `Step ${seq}.`,
+    data: {
+      activityId: `a${seq}`,
+      kind: "reading_notes",
+      state: "active",
+      steps: 1,
+      stats: {},
+    },
     ...overrides,
   };
 }
 
-function analysisFixture(state) {
+/** A parsed event, as the SDK would hand it to `describeEvent`. */
+function event(seq, type) {
   return {
-    id: ANALYSIS_ID,
-    mode: "ai",
-    trigger: "api",
-    state,
-    outcome: state === "completed" ? "presentations" : null,
-    noChangeReason: null,
-    contentIds: [],
-    context: "history",
-    scope: null,
-    intent: null,
-    title: null,
-    target: null,
-    presentationIds: [],
-    failure: null,
-    createdAt: "2026-08-12T10:00:02Z",
-    updatedAt: "2026-08-12T10:00:20Z",
+    seq,
+    at: "2026-08-12T10:00:02Z",
+    attempt: 1,
+    source: "backend",
+    type,
+    level: "info",
+    summary: `A ${type} happened.`,
+    data: {},
   };
+}
+
+function activityEvent(seq, activityId, data = {}) {
+  return {
+    ...event(seq, "agent.activity"),
+    source: "agent",
+    data: {
+      activityId,
+      kind: "other",
+      state: "active",
+      steps: 1,
+      stats: {},
+      ...data,
+    },
+  };
+}
+
+/** A wire fixture whose `agent.activity` data has been broken on purpose. */
+function activity(overrides) {
+  const data = { ...eventFixture(1).data, ...overrides };
+  for (const [key, value] of Object.entries(overrides)) {
+    if (value === undefined) {
+      delete data[key];
+    }
+  }
+  return { ...eventFixture(1), data };
 }
 
 function omit(record, key) {

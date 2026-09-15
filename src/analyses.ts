@@ -349,12 +349,9 @@ export class AnalysesResource {
    * exponential back-off), so events are not lost across a reconnect, and
    * iteration ends once the Analysis reaches `completed` or `failed`.
    *
-   * Events carry `summary` only. For tool inputs and outputs, read
-   * `timeline({ detail: "full" })` after the Analysis has finished.
-   *
    * ```ts
    * for await (const event of inklet.analyses.watch(analysis.id)) {
-   *   console.log(event.summary);
+   *   console.log(describeEvent(event));
    * }
    * ```
    */
@@ -368,21 +365,16 @@ export class AnalysesResource {
   /**
    * Iterate every event of an Analysis, paging automatically.
    *
-   * `detail: "full"` adds the verbatim agent payloads and requires a terminal
-   * Analysis: this checks the state first and throws `ConflictError` with
-   * `code: "analysis_in_progress"` rather than starting a walk the backend
-   * would reject part way through.
+   * The same events `watch()` yields, read after the fact rather than live.
+   * The agent's own working log — its turns, its individual tool calls, what
+   * a rejected plan was faulted for — is not part of the public API and is
+   * not available here at any depth.
    */
   timeline(
     analysisId: string,
     options: TimelineOptions = {},
   ): AsyncIterable<AnalysisEvent> {
-    return analysisEventTimeline(
-      this.#transport,
-      analysisId,
-      options,
-      async () => (await this.retrieve(analysisId)).state,
-    );
+    return analysisEventTimeline(this.#transport, analysisId, options);
   }
 
   /**

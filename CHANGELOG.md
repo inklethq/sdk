@@ -1,6 +1,55 @@
 # Changelog
 
-## Unreleased
+## 0.2.0
+
+The Analysis event stream is now a public progress report rather than a window
+onto the run. Everything in this release follows from that.
+
+- **Breaking:** `AnalysisEvent.type` is a closed set widened with
+  `(string & {})`. A public reader returns only `analysis.created`,
+  `analysis.dispatched`, `analysis.leased`, `analysis.completed`,
+  `analysis.failed`, `context.materialized`, `agent.activity`,
+  `plan.submitted`, `plan.rejected`, `plan.accepted`, `render.finished`,
+  `render.failed`, `delivery.published`, `delivery.confirmed`, and
+  `delivery.failed`. The agent's own working log — `turn.*`, `tool.*`,
+  `kernel.*`, `assistant.note`, `plan.validated` — is internal and never
+  appears. A type this SDK has never seen still parses, so a backend that adds
+  one does not break an older SDK. Adds `AnalysisEventType`.
+- **Breaking:** `AnalysisEvent.data` is typed per event type instead of always
+  being `Record<string, unknown>`. Adds `AgentActivityData`,
+  `AgentActivityKind`, `AgentActivityState`, `AgentActivityStats`,
+  `AnalysisCompletedData`, `AnalysisFailedData`, `ContextReadyData`,
+  `DeliveryEventData`, `PlanAcceptedData`, `PlanRejectedData`,
+  `PlanRejectedReason`, `PlanSubmittedData`, and `RenderEventData`. Parsing
+  stays tolerant: a known type validates the fields it is defined to carry and
+  passes every other field through, so a payload that gains a field still
+  reads. Adds `AnalysisEventOf` and `AnalysisEventWithType`.
+- **Breaking:** `AnalysisEvent.detail` is gone, along with
+  `AnalysisEventDetail`, `AnalysisEventDetailLevel`,
+  `ListAnalysisEventsOptions.detail`, and `TimelineOptions.detail`. Verbatim
+  tool inputs and outputs and model text are not part of the public API at any
+  depth. `timeline()` no longer reads the Analysis first, because there is no
+  longer a depth that requires a terminal state: the `409`
+  `analysis_in_progress` pre-check went with the option. A server that still
+  sends `detail` is read without it rather than refused.
+- **Breaking:** `AnalysisEvent.summary` is English. There is no locale option.
+- Add `isAnalysisEvent(event, type)`, which narrows an event to one known type
+  and its `data` with it. TypeScript cannot use `type` as a discriminant while
+  the open member is in the union, so `event.type === "agent.activity"` narrows
+  `type` but not `data`; this does both.
+- Add `mergeActivities(events)`, which collapses every `agent.activity` to its
+  latest state per `activityId`. One activity reports itself several times —
+  throttled `active` updates, then `done` or `failed` — so a raw list renders
+  the same row repeatedly. Each activity keeps the position of its first
+  appearance and every other event passes through untouched.
+- Add `describeEvent(event)`, a pure function returning one English line from
+  `type` and `data`, falling back to the backend's `summary`. It is what makes
+  `agent.activity` readable: the backend has no sentence for it, because what
+  it means depends on counters that change while it runs.
+- Document that `seq` is monotonic but **not contiguous** on a public stream:
+  the sequence is shared with internal events that are never returned, so
+  numbers are skipped. It remains a valid `after` cursor, and resuming across a
+  reconnect is unaffected. Nothing in the SDK assumed contiguity.
 
 - Add `Presentation.title`, the name a Display's history shows for the card.
   The backend resolves it when it accepts a plan (the plan's title, else the
@@ -32,19 +81,13 @@
   reads one page, `analyses.timeline()` pages through every event, and
   `analyses.archive()` returns a short-lived run-archive URL. Adds
   `AnalysisEvent`, `AnalysisEventLevel`, `AnalysisEventSource`,
-  `AnalysisEventDetail`, `AnalysisEventDetailLevel`, `AnalysisEventPage`,
-  `ListAnalysisEventsOptions`, `WatchAnalysisOptions`, `TimelineOptions`, and
-  `AnalysisArchive`.
+  `AnalysisEventPage`, `ListAnalysisEventsOptions`, `WatchAnalysisOptions`,
+  `TimelineOptions`, and `AnalysisArchive`.
 - `watch()` parses server-sent events incrementally, resumes from the last
   `seq` with `Last-Event-ID` after a dropped connection (five attempts,
   exponential back-off), and falls back to polling `listEvents()` when an
   intermediate proxy answers with something other than `text/event-stream`.
   `signal` aborts with `OperationAbortedError`.
-- Event `type` is an open set: unknown types parse rather than failing the
-  stream, so a backend that adds an event type does not break older SDKs.
-- `timeline({ detail: "full" })` verifies the Analysis is `completed` or
-  `failed` before the first page and otherwise throws `ConflictError` with
-  `code: "analysis_in_progress"`, matching the backend's 409.
 - Add `InkletClient.requestRaw()`, which returns the raw `Response` for
   streaming endpoints, and a matching `requestRaw` on the internal resource
   transport. `request()` now keeps a caller-supplied `accept` header, and an

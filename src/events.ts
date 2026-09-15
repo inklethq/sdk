@@ -3,12 +3,10 @@ import {
   delay,
   expectEnum,
   throwIfAborted,
-  validateEnumOption,
   validateWaitNumber,
 } from "./contents.js";
 import {
   ConfigurationError,
-  ConflictError,
   InvalidResponseError,
   NetworkError,
   OperationAbortedError,
@@ -20,10 +18,11 @@ import {
   expectRecord,
   expectRecordArray,
   expectString,
+  expectStringArray,
   validateLimit,
   type ResourceTransport,
 } from "./resource.js";
-import type { AnalysisState } from "./analyses.js";
+import type { AnalysisOutcome, AnalysisState } from "./analyses.js";
 
 export type AnalysisEventLevel = "info" | "warn" | "error";
 
@@ -31,51 +30,225 @@ export type AnalysisEventLevel = "info" | "warn" | "error";
 export type AnalysisEventSource = "agent" | "backend";
 
 /**
- * Verbatim agent payload. Only present on `agent` events read with
- * `detail: "full"`, which the backend allows once the Analysis is terminal.
+ * Every event type a public reader can return.
+ *
+ * The stream an Analysis publishes to you is a projection, not the run's
+ * internal log: it answers "where is this now" rather than "how is it doing
+ * it". The agent's turns, its individual tool calls, the kernel it chose, and
+ * the sentences a rejected plan was faulted for stay inside Inklet and never
+ * appear here, so nothing in your UI is pinned to our directory layout or to
+ * which tool happens to read what.
  */
-export interface AnalysisEventDetail {
-  /** Tool-call arguments, as sent by the agent. */
-  input?: unknown;
-  /** Tool result body. */
-  output?: string;
-  /** `true` when the tool call reported a failure. */
-  isError?: boolean;
-  /** Assistant text for `assistant.note` and similar events. */
-  text?: string;
+export type AnalysisEventType =
+  | "analysis.created"
+  | "analysis.dispatched"
+  | "analysis.leased"
+  | "analysis.completed"
+  | "analysis.failed"
+  | "context.materialized"
+  | "agent.activity"
+  | "plan.submitted"
+  | "plan.rejected"
+  | "plan.accepted"
+  | "render.finished"
+  | "render.failed"
+  | "delivery.published"
+  | "delivery.confirmed"
+  | "delivery.failed";
+
+/** What the agent is doing right now, as one `agent.activity` reports it. */
+export type AgentActivityKind =
+  | "reading_brief"
+  | "reading_notes"
+  | "checking_display"
+  | "choosing_layout"
+  | "submitting_plan"
+  | "retrying"
+  | "other";
+
+export type AgentActivityState = "active" | "done" | "failed";
+
+/**
+ * Counters for one activity. Every field is absent rather than `0` when it
+ * does not apply: "read no notes" and "this kind of activity does not count
+ * notes" are two different statements.
+ */
+export interface AgentActivityStats {
+  /** Distinct notes read. */
+  notesRead?: number;
+  /** Distinct layouts looked at. */
+  layoutsSeen?: number;
+  /** The layout the agent settled on. */
+  chosen?: string | null;
+  failedSteps?: number;
+  /** Steps the workspace guard refused. */
+  deniedSteps?: number;
 }
 
 /**
- * One entry in an Analysis event stream.
+ * A run of related agent steps, collapsed into one activity.
  *
- * `type` is an open set: the SDK parses unknown types instead of rejecting
- * them, so a backend that starts emitting a new event type never breaks an
- * older SDK. Switch on the types you know and fall back to `summary`, which
- * the backend always supplies as a single ready-to-display sentence.
- *
- * Known types: `analysis.created`, `analysis.dispatched`, `analysis.leased`,
- * `analysis.lease_expired`, `analysis.completed`, `analysis.failed`,
- * `context.materialized`, `kernel.selected`, `turn.started`, `turn.ended`,
- * `tool.called`, `tool.finished`, `assistant.note`, `plan.validated`,
- * `plan.submitted`, `plan.accepted`, `plan.rejected`, `render.finished`,
- * `render.failed`, `delivery.published`, `delivery.confirmed`,
- * `delivery.failed`.
+ * The same `activityId` arrives several times as the activity progresses:
+ * throttled `active` updates, then a final `done` or `failed`. Upsert by
+ * `activityId` rather than appending, or use {@link mergeActivities}.
  */
-export interface AnalysisEvent {
-  /** Monotonic per Analysis. Use it as `after` to resume. */
+export interface AgentActivityData {
+  /** Stable for the life of one activity, unique within an `attempt`. */
+  activityId: string;
+  kind: AgentActivityKind;
+  state: AgentActivityState;
+  /** Steps folded into this activity so far. */
+  steps: number;
+  stats: AgentActivityStats;
+}
+
+/** Why a plan was sent back. The problem sentences themselves are internal. */
+export type PlanRejectedReason =
+  | "layout_mismatch"
+  | "target"
+  | "content_refs"
+  | "schema"
+  | "other";
+
+export interface PlanRejectedData {
+  /** How many problems were found, not what they were. */
+  problems: number;
+  reason: PlanRejectedReason;
+  attempt: number;
+}
+
+export interface PlanSubmittedData {
+  /** 1 for the first submission, higher after a correction round. */
+  round: number;
+  /** Absent when the agent gave up instead of submitting a usable plan. */
+  outcome?: AnalysisOutcome;
+  /** How many actions the plan asks for. */
+  actions?: number;
+}
+
+export interface PlanAcceptedData {
+  presentationIds: readonly string[];
+  /** How many actions the plan asked for. */
+  actions: number;
+}
+
+export interface AnalysisCompletedData {
+  outcome: AnalysisOutcome;
+  /** How many Presentations the run produced. */
+  presentations: number;
+}
+
+export interface AnalysisFailedData {
+  /** The backend failure code, the same one `Analysis.failure.code` carries. */
+  code: string;
+}
+
+/** Counts of what the agent was given to work with. */
+export interface ContextReadyData {
+  /** Contents named by the Analysis. */
+  contents: number;
+  /** Earlier Contents retrieved from history. */
+  history: number;
+  displays: number;
+  /** Layouts available to choose from. */
+  templates: number;
+  /** Size of the materialized workspace. */
+  bytes?: number;
+  /** `true` when at least one image was included. */
+  vision?: boolean;
+  /** Present, and the event is `warn`, when something was degraded. */
+  warnings?: number;
+}
+
+export interface RenderEventData {
+  presentationId: string;
+  displayId?: string;
+}
+
+export interface DeliveryEventData {
+  /** Absent on a delivery that names no Presentation. */
+  presentationId?: string;
+  displayId?: string;
+}
+
+/** Fields every event carries, whatever its type. */
+interface AnalysisEventFields {
+  /**
+   * Monotonic per Analysis, and the value to pass back as `after` to resume.
+   *
+   * It is not contiguous: the sequence is shared with the run's internal
+   * events, which a public reader never returns, so a public stream skips
+   * numbers. Treat it as an ordering and a resume token, never as a count or
+   * an index.
+   */
   seq: number;
   at: string;
   /** Which execution attempt produced the event; retries restart the agent. */
   attempt: number;
   source: AnalysisEventSource;
-  type: string;
   level: AnalysisEventLevel;
-  /** A displayable one-line summary generated by the backend. */
+  /** A displayable one-line English summary generated by the backend. */
   summary: string;
+}
+
+/** One event type paired with the `data` that type carries. */
+export interface AnalysisEventOf<T extends string, D> extends AnalysisEventFields {
+  type: T;
   /** Structured, type-specific fields. Empty when the event carries none. */
-  data: Record<string, unknown>;
-  /** `null` unless the page was read with `detail: "full"`. */
-  detail: AnalysisEventDetail | null;
+  data: D;
+}
+
+/**
+ * One entry in an Analysis event stream.
+ *
+ * `data` is discriminated on `type` for every type this SDK knows, and the
+ * last member of the union is the escape hatch: a type this SDK has never seen
+ * parses as `Record<string, unknown>` rather than failing the stream, so a
+ * backend that starts publishing a new type never breaks an older SDK.
+ *
+ * TypeScript cannot use `type` as a discriminant while that open member is in
+ * the union, so `event.type === "agent.activity"` narrows `type` but not
+ * `data`. Use {@link isAnalysisEvent} where you want the payload typed, and
+ * fall back to `summary` — or {@link describeEvent} — for everything else.
+ */
+export type AnalysisEvent =
+  | AnalysisEventOf<"analysis.created", Record<string, unknown>>
+  | AnalysisEventOf<"analysis.dispatched", Record<string, unknown>>
+  | AnalysisEventOf<"analysis.leased", Record<string, unknown>>
+  | AnalysisEventOf<"analysis.completed", AnalysisCompletedData>
+  | AnalysisEventOf<"analysis.failed", AnalysisFailedData>
+  | AnalysisEventOf<"context.materialized", ContextReadyData>
+  | AnalysisEventOf<"agent.activity", AgentActivityData>
+  | AnalysisEventOf<"plan.submitted", PlanSubmittedData>
+  | AnalysisEventOf<"plan.rejected", PlanRejectedData>
+  | AnalysisEventOf<"plan.accepted", PlanAcceptedData>
+  | AnalysisEventOf<"render.finished", RenderEventData>
+  | AnalysisEventOf<"render.failed", RenderEventData>
+  | AnalysisEventOf<"delivery.published", DeliveryEventData>
+  | AnalysisEventOf<"delivery.confirmed", DeliveryEventData>
+  | AnalysisEventOf<"delivery.failed", DeliveryEventData>
+  | AnalysisEventOf<string & {}, Record<string, unknown>>;
+
+/** The event of one known type, with its `data` typed. */
+export type AnalysisEventWithType<T extends AnalysisEventType> = Extract<
+  AnalysisEvent,
+  { type: T }
+>;
+
+/**
+ * Narrow an event to one known type, and its `data` with it.
+ *
+ * ```ts
+ * if (isAnalysisEvent(event, "agent.activity")) {
+ *   upsert(event.data.activityId, event.data.state);
+ * }
+ * ```
+ */
+export function isAnalysisEvent<T extends AnalysisEventType>(
+  event: AnalysisEvent,
+  type: T,
+): event is AnalysisEventWithType<T> {
+  return event.type === type;
 }
 
 export interface AnalysisEventPage {
@@ -92,15 +265,7 @@ export interface ListAnalysisEventsOptions {
   after?: number;
   /** 1-200. The backend picks a default when omitted. */
   limit?: number;
-  /**
-   * `full` adds `detail` to agent events and is only available once the
-   * Analysis is `completed` or `failed`; earlier it is a `ConflictError` with
-   * `code: "analysis_in_progress"`.
-   */
-  detail?: AnalysisEventDetailLevel;
 }
-
-export type AnalysisEventDetailLevel = "summary" | "full";
 
 export interface WatchAnalysisOptions {
   /** Resume after this `seq` instead of replaying from the beginning. */
@@ -119,8 +284,6 @@ export interface WatchAnalysisOptions {
 }
 
 export interface TimelineOptions {
-  /** Defaults to `summary`. `full` requires a terminal Analysis. */
-  detail?: AnalysisEventDetailLevel;
   /** Events per request, 1-200. Defaults to 100. */
   pageSize?: number;
   /** Start after this `seq` instead of at the first event. */
@@ -135,6 +298,30 @@ export interface AnalysisArchive {
 }
 
 const ANALYSIS_STATES = ["queued", "running", "completed", "failed"] as const;
+const ANALYSIS_OUTCOMES = ["presentations", "no_change"] as const;
+const ACTIVITY_KINDS = [
+  "reading_brief",
+  "reading_notes",
+  "checking_display",
+  "choosing_layout",
+  "submitting_plan",
+  "retrying",
+  "other",
+] as const;
+const ACTIVITY_STATES = ["active", "done", "failed"] as const;
+const ACTIVITY_STAT_COUNTS = [
+  "notesRead",
+  "layoutsSeen",
+  "failedSteps",
+  "deniedSteps",
+] as const;
+const PLAN_REJECTED_REASONS = [
+  "layout_mismatch",
+  "target",
+  "content_refs",
+  "schema",
+  "other",
+] as const;
 const MAX_EVENT_LIMIT = 200;
 const DEFAULT_TIMELINE_PAGE_SIZE = 100;
 const WATCH_PAGE_LIMIT = MAX_EVENT_LIMIT;
@@ -153,7 +340,6 @@ interface ResolvedWatchOptions {
 interface ResolvedTimelineOptions {
   after: number | undefined;
   signal: AbortSignal | undefined;
-  detail: AnalysisEventDetailLevel;
   pageSize: number;
 }
 
@@ -198,23 +384,19 @@ export function analysisEventTimeline(
   transport: ResourceTransport,
   analysisId: string,
   options: TimelineOptions,
-  readState: () => Promise<AnalysisState>,
 ): AsyncIterable<AnalysisEvent> {
   if (!options || typeof options !== "object") {
     throw new ConfigurationError("timeline options must be an object.");
   }
   const encodedId = encodePathSegment(analysisId, "analysisId");
-  const detail = options.detail ?? "summary";
-  validateEnumOption(detail, ["summary", "full"], "detail");
   const resolved: ResolvedTimelineOptions = {
     after: validateAfter(options.after),
     signal: options.signal,
-    detail,
     pageSize:
       validateLimit(options.pageSize, MAX_EVENT_LIMIT) ??
       DEFAULT_TIMELINE_PAGE_SIZE,
   };
-  return iterateTimeline(transport, encodedId, resolved, readState);
+  return iterateTimeline(transport, encodedId, resolved);
 }
 
 export async function retrieveAnalysisArchive(
@@ -230,6 +412,209 @@ export async function retrieveAnalysisArchive(
     url: expectString(record, "url"),
     expiresAt: expectString(record, "expiresAt"),
   };
+}
+
+/**
+ * Collapse every `agent.activity` to its latest state, keyed by `activityId`.
+ *
+ * One activity reports itself several times — throttled `active` updates and
+ * then `done` or `failed` — so a raw list renders the same row over and over.
+ * Each activity keeps the position of its first appearance, so the order still
+ * reads as the order things started, and every other event is passed through
+ * untouched.
+ *
+ * ```ts
+ * const events = mergeActivities(await collect(inklet.analyses.timeline(id)));
+ * ```
+ */
+export function mergeActivities(
+  events: Iterable<AnalysisEvent>,
+): AnalysisEvent[] {
+  const merged: AnalysisEvent[] = [];
+  const positions = new Map<string, number>();
+
+  for (const event of events) {
+    if (!isAnalysisEvent(event, "agent.activity")) {
+      merged.push(event);
+      continue;
+    }
+    const at = positions.get(event.data.activityId);
+    if (at === undefined) {
+      positions.set(event.data.activityId, merged.length);
+      merged.push(event);
+      continue;
+    }
+    merged[at] = event;
+  }
+
+  return merged;
+}
+
+/**
+ * One English line for an event, read from `type` and `data`.
+ *
+ * `agent.activity` is the reason this exists: it is the only public type the
+ * backend has no sentence for, because what it means depends on counters that
+ * change as the activity runs. Every other type falls back to the `summary`
+ * the backend already wrote whenever there is nothing better to say.
+ *
+ * Pure, and English only — there is no locale option.
+ */
+export function describeEvent(event: AnalysisEvent): string {
+  if (isAnalysisEvent(event, "agent.activity")) {
+    return describeActivity(event.data);
+  }
+  if (isAnalysisEvent(event, "context.materialized")) {
+    return describeContext(event.data);
+  }
+  if (isAnalysisEvent(event, "plan.submitted")) {
+    return describePlanSubmitted(event.data);
+  }
+  if (isAnalysisEvent(event, "plan.rejected")) {
+    const { problems, reason } = event.data;
+    const what = PLAN_REJECTED_PHRASES[reason];
+    return `Plan sent back · ${count(problems, "problem")}${what === "" ? "" : ` with ${what}`}`;
+  }
+  if (isAnalysisEvent(event, "plan.accepted")) {
+    return `Plan accepted · ${count(event.data.presentationIds.length, "Presentation")}`;
+  }
+  if (isAnalysisEvent(event, "analysis.completed")) {
+    return event.data.outcome === "no_change"
+      ? "Finished · nothing worth showing"
+      : `Finished · ${count(event.data.presentations, "Presentation")}`;
+  }
+  if (isAnalysisEvent(event, "analysis.failed")) {
+    return `Failed · ${event.data.code}`;
+  }
+  if (isAnalysisEvent(event, "render.finished")) {
+    return `Rendered ${event.data.presentationId}`;
+  }
+  if (isAnalysisEvent(event, "render.failed")) {
+    return `Could not render ${event.data.presentationId}`;
+  }
+  if (
+    isAnalysisEvent(event, "delivery.published") ||
+    isAnalysisEvent(event, "delivery.confirmed") ||
+    isAnalysisEvent(event, "delivery.failed")
+  ) {
+    return describeDelivery(event.type, event.data) ?? event.summary;
+  }
+  return event.summary;
+}
+
+const PLAN_REJECTED_PHRASES: Record<PlanRejectedReason, string> = {
+  layout_mismatch: "the layout it chose",
+  target: "the Display it chose",
+  content_refs: "the Content it referred to",
+  schema: "the shape of the plan",
+  other: "",
+};
+
+function describeActivity(data: AgentActivityData): string {
+  const { kind, state, stats } = data;
+  if (state === "failed") {
+    return ACTIVITY_FAILED_PHRASES[kind];
+  }
+  const done = state === "done";
+
+  switch (kind) {
+    case "reading_brief":
+      return done ? "Read the brief" : "Reading the brief";
+    case "reading_notes":
+      return progress(done, stats.notesRead, "note", "Reading notes", "Read");
+    case "checking_display":
+      return done ? "Checked the Display" : "Checking the Display";
+    case "choosing_layout":
+      // A chosen layout is the whole point of the activity, so it outranks the
+      // running count even while the activity is still open.
+      if (typeof stats.chosen === "string") {
+        return `Chose ${stats.chosen}`;
+      }
+      return progress(
+        done, stats.layoutsSeen, "layout", "Looking at layouts", "Looked at",
+      );
+    case "submitting_plan":
+      return done ? "Submitted the plan" : "Submitting the plan";
+    case "retrying":
+      return done ? "Tried another layout" : "Trying another layout";
+    default:
+      return done ? "Finished a step" : "Working";
+  }
+}
+
+const ACTIVITY_FAILED_PHRASES: Record<AgentActivityKind, string> = {
+  reading_brief: "Could not read the brief",
+  reading_notes: "Could not read the notes",
+  checking_display: "Could not check the Display",
+  choosing_layout: "Could not settle on a layout",
+  submitting_plan: "Could not submit the plan",
+  retrying: "Could not find another layout",
+  other: "A step failed",
+};
+
+/** `Read 3 notes` once it is over, `Reading notes · 3 so far` while it runs. */
+function progress(
+  done: boolean,
+  seen: number | undefined,
+  noun: string,
+  running: string,
+  finished: string,
+): string {
+  if (seen === undefined) {
+    return done ? `${finished} the ${noun}s` : running;
+  }
+  return done ? `${finished} ${count(seen, noun)}` : `${running} · ${seen} so far`;
+}
+
+function describeContext(data: ContextReadyData): string {
+  const parts = [count(data.contents, "Content")];
+  if (data.history > 0) {
+    parts.push(`${data.history} from history`);
+  }
+  parts.push(count(data.displays, "Display"), count(data.templates, "layout"));
+  if (data.vision === true) {
+    parts.push("images");
+  }
+  const line = `Ready · ${parts.join(", ")}`;
+  return data.warnings === undefined || data.warnings === 0
+    ? line
+    : `${line} · ${count(data.warnings, "gap")}`;
+}
+
+function describePlanSubmitted(data: PlanSubmittedData): string {
+  const round = data.round > 1 ? ` (round ${data.round})` : "";
+  if (data.outcome === "no_change") {
+    return `Submitted the plan${round} · nothing worth showing`;
+  }
+  if (data.actions === undefined) {
+    return `Submitted the plan${round}`;
+  }
+  return `Submitted the plan${round} · ${count(data.actions, "action")}`;
+}
+
+function describeDelivery(
+  type: string,
+  data: DeliveryEventData,
+): string | null {
+  const { presentationId, displayId } = data;
+  if (presentationId === undefined) {
+    return null;
+  }
+  const where = displayId === undefined ? "" : ` to Display ${displayId}`;
+  switch (type) {
+    case "delivery.published":
+      return `Sent ${presentationId}${where}`;
+    case "delivery.confirmed":
+      return displayId === undefined
+        ? `${presentationId} is showing`
+        : `Display ${displayId} is showing ${presentationId}`;
+    default:
+      return `Could not deliver ${presentationId}${where}`;
+  }
+}
+
+function count(value: number, noun: string): string {
+  return `${value} ${noun}${value === 1 ? "" : "s"}`;
 }
 
 async function* streamAnalysisEvents(
@@ -353,24 +738,11 @@ async function* iterateTimeline(
   transport: ResourceTransport,
   encodedId: string,
   options: ResolvedTimelineOptions,
-  readState: () => Promise<AnalysisState>,
 ): AsyncGenerator<AnalysisEvent, void, undefined> {
-  if (options.detail === "full") {
-    // Fail before the first page rather than part way through the timeline.
-    const state = await readState();
-    if (!isTerminalState(state)) {
-      throw new ConflictError(
-        "Full Analysis event detail is only available once the Analysis has completed or failed.",
-        { code: "analysis_in_progress", details: { state } },
-      );
-    }
-  }
-
   let after = options.after;
   while (true) {
     throwIfAborted(options.signal, TIMELINE_ABORTED);
     const page = await fetchEventPage(transport, encodedId, {
-      detail: options.detail,
       limit: options.pageSize,
       ...(after === undefined ? {} : { after }),
     });
@@ -411,10 +783,6 @@ function eventQuery(options: ListAnalysisEventsOptions): string {
   const limit = validateLimit(options.limit, MAX_EVENT_LIMIT);
   if (limit !== undefined) {
     query.set("limit", String(limit));
-  }
-  if (options.detail !== undefined) {
-    validateEnumOption(options.detail, ["summary", "full"], "detail");
-    query.set("detail", options.detail);
   }
   return query.size === 0 ? "" : `?${query.toString()}`;
 }
@@ -509,58 +877,174 @@ export function parseAnalysisEvent(
   if (typeof summary !== "string") {
     throw new InvalidResponseError();
   }
+  // Deliberately any non-empty string: new event types must not break reads.
+  const type = expectString(record, "type");
   return {
     seq: expectSequence(record, "seq"),
     at: expectString(record, "at"),
     attempt: expectSequence(record, "attempt"),
     source: expectEnum(record.source, ["agent", "backend"] as const),
-    // Deliberately any non-empty string: new event types must not break reads.
-    type: expectString(record, "type"),
+    type,
     level: expectEnum(record.level, ["info", "warn", "error"] as const),
     summary,
-    data: parseEventData(record.data),
-    detail: parseEventDetail(record.detail ?? null),
+    data: parseEventData(type, record.data),
+  } as AnalysisEvent;
+}
+
+/**
+ * Validate the fields a known type is defined to carry, and pass the rest
+ * through untouched.
+ *
+ * A type this SDK does not know keeps its `data` verbatim, and so does any
+ * field a known type gained after this SDK was published: the overlay is
+ * applied on top of the record rather than replacing it. Only a known type
+ * whose own fields are missing or malformed is rejected.
+ */
+function parseEventData(type: string, value: unknown): Record<string, unknown> {
+  const data =
+    value === undefined || value === null ? {} : { ...expectRecord(value) };
+  switch (type) {
+    case "agent.activity":
+      return { ...data, ...parseAgentActivity(data) };
+    case "context.materialized":
+      return { ...data, ...parseContextReady(data) };
+    case "plan.submitted":
+      return { ...data, ...parsePlanSubmitted(data) };
+    case "plan.rejected":
+      return { ...data, ...parsePlanRejected(data) };
+    case "plan.accepted":
+      return {
+        ...data,
+        presentationIds: expectStringArray(data.presentationIds ?? []),
+        actions: expectSequence(data, "actions"),
+      };
+    case "analysis.completed":
+      return {
+        ...data,
+        outcome: expectEnum(data.outcome, ANALYSIS_OUTCOMES),
+        presentations: expectSequence(data, "presentations"),
+      };
+    case "analysis.failed":
+      return { ...data, code: expectString(data, "code") };
+    case "render.finished":
+    case "render.failed":
+      return {
+        ...data,
+        presentationId: expectString(data, "presentationId"),
+        ...optionalField("displayId", optionalString(data.displayId)),
+      };
+    case "delivery.published":
+    case "delivery.confirmed":
+    case "delivery.failed":
+      return {
+        ...data,
+        ...optionalField("presentationId", optionalString(data.presentationId)),
+        ...optionalField("displayId", optionalString(data.displayId)),
+      };
+    default:
+      return data;
+  }
+}
+
+function parseAgentActivity(data: Record<string, unknown>): AgentActivityData {
+  return {
+    activityId: expectString(data, "activityId"),
+    kind: expectEnum(data.kind, ACTIVITY_KINDS),
+    state: expectEnum(data.state, ACTIVITY_STATES),
+    steps: expectSequence(data, "steps"),
+    stats: parseActivityStats(data.stats),
   };
 }
 
-function parseEventData(value: unknown): Record<string, unknown> {
+function parseActivityStats(value: unknown): AgentActivityStats {
   if (value === undefined || value === null) {
     return {};
   }
-  return { ...expectRecord(value) };
+  const record = expectRecord(value);
+  const stats: AgentActivityStats = {};
+  for (const key of ACTIVITY_STAT_COUNTS) {
+    const count = optionalSequence(record[key]);
+    if (count !== undefined) {
+      stats[key] = count;
+    }
+  }
+  // `chosen` is the one stat that is a name rather than a count, and the one
+  // that is meaningfully `null`: the agent looked but has not settled yet.
+  if (record.chosen !== undefined) {
+    stats.chosen = record.chosen === null ? null : expectString(record, "chosen");
+  }
+  return stats;
 }
 
-function parseEventDetail(value: unknown): AnalysisEventDetail | null {
-  if (value === undefined || value === null) {
-    return null;
-  }
-  const record = expectRecord(value);
-  const detail: AnalysisEventDetail = {};
-  if (record.input !== undefined) {
-    detail.input = record.input;
-  }
-  const output = optionalString(record.output);
-  if (output !== undefined) {
-    detail.output = output;
-  }
-  if (record.isError !== undefined && record.isError !== null) {
-    if (typeof record.isError !== "boolean") {
-      throw new InvalidResponseError();
-    }
-    detail.isError = record.isError;
-  }
-  const text = optionalString(record.text);
-  if (text !== undefined) {
-    detail.text = text;
-  }
-  return detail;
+function parseContextReady(data: Record<string, unknown>): ContextReadyData {
+  return {
+    contents: expectSequence(data, "contents"),
+    history: expectSequence(data, "history"),
+    displays: expectSequence(data, "displays"),
+    templates: expectSequence(data, "templates"),
+    ...optionalField("bytes", optionalSequence(data.bytes)),
+    ...optionalField("vision", optionalBoolean(data.vision)),
+    ...optionalField("warnings", optionalSequence(data.warnings)),
+  };
+}
+
+function parsePlanSubmitted(data: Record<string, unknown>): PlanSubmittedData {
+  return {
+    round: expectSequence(data, "round"),
+    ...optionalField(
+      "outcome",
+      data.outcome === undefined || data.outcome === null
+        ? undefined
+        : expectEnum(data.outcome, ANALYSIS_OUTCOMES),
+    ),
+    ...optionalField("actions", optionalSequence(data.actions)),
+  };
+}
+
+function parsePlanRejected(data: Record<string, unknown>): PlanRejectedData {
+  return {
+    // A count, never the sentences. An older backend that still sends the list
+    // is read for its length rather than refused.
+    problems: Array.isArray(data.problems)
+      ? data.problems.length
+      : expectSequence(data, "problems"),
+    reason: expectEnum(data.reason, PLAN_REJECTED_REASONS),
+    attempt: expectSequence(data, "attempt"),
+  };
+}
+
+function optionalField<K extends string, V>(
+  key: K,
+  value: V | undefined,
+): Record<K, V> | Record<string, never> {
+  return value === undefined ? {} : ({ [key]: value } as Record<K, V>);
 }
 
 function optionalString(value: unknown): string | undefined {
   if (value === undefined || value === null) {
     return undefined;
   }
-  if (typeof value !== "string") {
+  if (typeof value !== "string" || value.length === 0) {
+    throw new InvalidResponseError();
+  }
+  return value;
+}
+
+function optionalBoolean(value: unknown): boolean | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (typeof value !== "boolean") {
+    throw new InvalidResponseError();
+  }
+  return value;
+}
+
+function optionalSequence(value: unknown): number | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
     throw new InvalidResponseError();
   }
   return value;

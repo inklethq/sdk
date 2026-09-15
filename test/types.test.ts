@@ -3,16 +3,33 @@ import {
   Inklet,
   NoChangeError,
   SubscriptionRequiredError,
+  describeEvent,
+  isAnalysisEvent,
+  mergeActivities,
+  type AgentActivityData,
+  type AgentActivityKind,
+  type AgentActivityState,
+  type AgentActivityStats,
   type Analysis,
   type AnalysisArchive,
+  type AnalysisCompletedData,
   type AnalysisEvent,
   type AnalysisEventLevel,
   type AnalysisEventPage,
   type AnalysisEventSource,
+  type AnalysisEventType,
+  type AnalysisFailedData,
   type AnalysisScope,
   type AnalysisScopeInput,
   type AnalyzeInput,
+  type ContextReadyData,
+  type DeliveryEventData,
   type ListAnalysisEventsOptions,
+  type PlanAcceptedData,
+  type PlanRejectedData,
+  type PlanRejectedReason,
+  type PlanSubmittedData,
+  type RenderEventData,
   type TimelineOptions,
   type WatchAnalysisOptions,
   type AutoPushInput,
@@ -170,7 +187,6 @@ void displayHistoryPage.then((page) => {
 const listEventsOptions = {
   after: 12,
   limit: 200,
-  detail: "full",
 } satisfies ListAnalysisEventsOptions;
 
 const watchOptions = {
@@ -181,9 +197,16 @@ const watchOptions = {
 } satisfies WatchAnalysisOptions;
 
 const timelineOptions = {
-  detail: "full",
   pageSize: 100,
 } satisfies TimelineOptions;
+
+// `detail` is gone from both readers, and from the event itself.
+// @ts-expect-error the option no longer exists
+const removedListDetail: ListAnalysisEventsOptions = { detail: "full" };
+// @ts-expect-error the option no longer exists
+const removedTimelineDetail: TimelineOptions = { detail: "full" };
+void removedListDetail;
+void removedTimelineDetail;
 
 const eventPagePromise: Promise<AnalysisEventPage> = client.analyses.listEvents(
   "analysis_123",
@@ -201,20 +224,81 @@ const liveEvents: AsyncIterable<AnalysisEvent> = client.analyses.watch(
   watchOptions,
 );
 void (async () => {
+  const collected: AnalysisEvent[] = [];
   for await (const event of liveEvents) {
     const level: AnalysisEventLevel = event.level;
     const source: AnalysisEventSource = event.source;
-    const type: string = event.type;
+    const type: AnalysisEventType | (string & {}) = event.type;
     const summary: string = event.summary;
-    const data: Record<string, unknown> = event.data;
-    const output: string | undefined = event.detail?.output;
+    const line: string = describeEvent(event);
+    collected.push(event);
+
+    // `data` is typed per known type, reached through the narrowing guard.
+    if (isAnalysisEvent(event, "agent.activity")) {
+      const activity: AgentActivityData = event.data;
+      const activityId: string = activity.activityId;
+      const kind: AgentActivityKind = activity.kind;
+      const state: AgentActivityState = activity.state;
+      const stats: AgentActivityStats = activity.stats;
+      const notesRead: number | undefined = stats.notesRead;
+      const chosen: string | null | undefined = stats.chosen;
+      void activityId;
+      void kind;
+      void state;
+      void notesRead;
+      void chosen;
+    } else if (isAnalysisEvent(event, "plan.rejected")) {
+      const rejected: PlanRejectedData = event.data;
+      const reason: PlanRejectedReason = rejected.reason;
+      const problems: number = rejected.problems;
+      void reason;
+      void problems;
+    } else if (isAnalysisEvent(event, "plan.submitted")) {
+      const submitted: PlanSubmittedData = event.data;
+      void submitted.outcome;
+      void submitted.actions;
+    } else if (isAnalysisEvent(event, "plan.accepted")) {
+      const accepted: PlanAcceptedData = event.data;
+      const ids: readonly string[] = accepted.presentationIds;
+      void ids;
+    } else if (isAnalysisEvent(event, "context.materialized")) {
+      const context: ContextReadyData = event.data;
+      const contents: number = context.contents;
+      void contents;
+      void context.warnings;
+    } else if (isAnalysisEvent(event, "analysis.completed")) {
+      const completed: AnalysisCompletedData = event.data;
+      void completed.outcome;
+      void completed.presentations;
+    } else if (isAnalysisEvent(event, "analysis.failed")) {
+      const failed: AnalysisFailedData = event.data;
+      const code: string = failed.code;
+      void code;
+    } else if (isAnalysisEvent(event, "render.finished")) {
+      const render: RenderEventData = event.data;
+      const presentationId: string = render.presentationId;
+      void presentationId;
+    } else if (isAnalysisEvent(event, "delivery.confirmed")) {
+      const delivery: DeliveryEventData = event.data;
+      void delivery.presentationId;
+      void delivery.displayId;
+    } else if (isAnalysisEvent(event, "analysis.created")) {
+      // A known type with no documented payload keeps the open record.
+      const data: Record<string, unknown> = event.data;
+      void data;
+    }
+
     void level;
     void source;
     void type;
     void summary;
-    void data;
-    void output;
+    void line;
   }
+
+  const merged: AnalysisEvent[] = mergeActivities(collected);
+  const rerun: AnalysisEvent[] = mergeActivities(new Set(merged));
+  void rerun;
+
   for await (const event of client.analyses.timeline(
     "analysis_123",
     timelineOptions,
