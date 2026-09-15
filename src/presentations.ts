@@ -145,9 +145,10 @@ export interface PresentationPage {
    * are showing, not as an error; nothing is deleted, and after an upgrade the
    * same call returns the older rows untouched.
    *
-   * `null` when nothing was clipped, which covers both an unlimited plan and a
-   * scope with no Display half (`scope: "generated"`). Only the Display half is
-   * capped, so `scope: "display"` and `scope: "all"` can report a floor.
+   * Reported whenever a floor is in force, whether or not any row fell outside
+   * it; `null` when no floor applies — an unlimited plan, or a scope with no
+   * Display half (`scope: "generated"`). Only the Display half is capped, so
+   * `scope: "display"` and `scope: "all"` can report a floor.
    * `displays.listQueue()`, `displays.current()`, and
    * `presentations.retrieve()` are not affected: a Presentation you already
    * hold the id for stays readable.
