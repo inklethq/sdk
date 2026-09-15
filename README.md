@@ -107,6 +107,10 @@ half just the same, and `scope: "generated"` contradicts the filter and is an
 belonging to someone else, returns an empty page; an id that is not well formed
 is rejected the same way as a contradictory scope.
 
+Without a `displayId`, `scope` defaults to `generated` instead, so a bare
+`presentations.list()` returns the software-only Presentations and none of the
+Display ones. Ask for `scope: "display"` or `scope: "all"` when you want those.
+
 How far back that history reaches depends on the plan: the Free plan sees the
 last 7 days of Display Presentations, Pro sees all of them. The list clamps
 rather than failing — older rows are left out — and the page says where the
@@ -122,12 +126,14 @@ if (history.historyWindowStart) {
 }
 ```
 
-`historyWindowStart` is an RFC3339 UTC timestamp, or `null` when nothing was
-clipped — an unlimited plan, or a `scope: "generated"` read, which has no
-Display half. Nothing is deleted: the hidden Presentations come back on the
-same call after an upgrade. `displays.listQueue()`, `displays.current()`, and
-`presentations.retrieve()` are unaffected, so a Presentation whose id you
-already hold stays readable either way.
+`historyWindowStart` is an RFC3339 UTC timestamp, or `null` when no floor
+applies — an unlimited plan, or a `scope: "generated"` read, which has no
+Display half. It reports the floor whenever one applies, not only when rows
+were actually left out, so it is safe to render as "history starts here" on a
+page that happens to be short. Nothing is deleted: the hidden Presentations
+come back on the same call after an upgrade. `displays.listQueue()`,
+`displays.current()`, and `presentations.retrieve()` are unaffected, so a
+Presentation whose id you already hold stays readable either way.
 
 ## Upload, then analyze
 
@@ -184,6 +190,12 @@ const { content: img } = await inklet.contents.upload({ assets: [inklet.assets.i
 await inklet.direct({ contentId: img.id, target: { displayIds: [displayId] } });
 ```
 
+Omitting `target` asks Inklet to pick the Displays, so it needs at least one
+usable one. An account with none is refused at creation — HTTP 422,
+`code: "no_compatible_display"` — instead of running a full pass and failing
+at the end with a message about the Content. A `{ output }` target is
+unaffected: a software-only Presentation needs no Display.
+
 A `no_change` outcome is a normal completion and is only possible when you
 pass no `contentIds`: the agent looked at recent history and decided nothing
 was worth showing. `analyses.wait()` throws `AnalysisFailedError` only when the
@@ -203,6 +215,21 @@ A timeout throws `OperationTimeoutError` but does not cancel the Analysis;
 
 Scheduled analyses created by Inklet appear in
 `inklet.analyses.list({ trigger: "scheduled" })`.
+
+### Idempotency
+
+`POST /analyses` and `POST /contents` both require an `Idempotency-Key`, and
+the SDK always sends one: your `idempotencyKey` when you pass it, otherwise a
+generated `sdk-<uuid>`. A key is 8 to 128 printable ASCII characters with no
+spaces; anything else is a `ConfigurationError` before the request leaves.
+
+Replaying a key returns the original resource rather than creating a second
+one. The same key with a different body is a `ConflictError` with
+`code: "idempotency_conflict"`. Keys are scoped per route, so one key can
+cover both the Content and the Analysis — which is exactly what `push.*` and
+`presentations.generate()` do, and why they return the key they used. A
+request the backend *rejects* releases its key, so a call that failed on a
+fixable problem can be retried under the same one.
 
 ## Follow an Analysis
 
@@ -232,12 +259,21 @@ now*, and it is a closed set of sixteen types:
 | Result | `render.finished` · `render.failed` · `delivery.published` · `delivery.confirmed` · `delivery.failed` |
 | Finished | `analysis.completed` · `analysis.failed` |
 
+The Result row lands *after* the Analysis is already terminal: the run ends
+when the plan is accepted, and only then do the Presentations render and a
+panel fetch and confirm them — which for an offline panel can be days later.
+`watch()` closes at the terminal state and so never yields those, by design;
+nobody should hold a stream open waiting for a sleeping Display. Read them
+afterwards with `timeline()` or `listEvents()`, which page over every event
+the run has.
+
 The agent's own working log — each turn, each tool call and its arguments and
 output, the sentences a rejected plan was faulted for — **is not part of the
 public API** and is not readable at any depth. Those are the run's
 implementation: they name our workspace paths and change whenever the agent
 does, and a UI built on them would break on a release that changed nothing you
-can see.
+can see. There is no depth option in the SDK, and a hand-rolled `?detail=` on
+the public endpoint is rejected rather than honoured.
 
 Every event carries `seq`, `at`, `attempt`, `source` (`agent` or `backend`),
 `type`, `level`, a ready-to-display English `summary`, and structured `data`.
@@ -247,9 +283,12 @@ Every event carries `seq`, `at`, `attempt`, `source` (`agent` or `backend`),
 which you never receive, so a public stream skips numbers. Treat it as an
 ordering and a resume token, never as a count or an index.
 
-`data` is typed per event type. `type` itself is open — a type this SDK has
-never seen parses as `Record<string, unknown>` rather than failing the stream —
-so reach for the payload through `isAnalysisEvent()`, which narrows both:
+`data` is typed per event type, and only the fields the SDK declares are
+validated: anything else the backend sends on a known type is passed through
+rather than dropped, so a payload that gains a field still reads. `type` itself
+is open too — a type this SDK has never seen parses as
+`Record<string, unknown>` rather than failing the stream — so reach for the
+payload through `isAnalysisEvent()`, which narrows both:
 
 ```ts
 import { isAnalysisEvent } from "@inklethq/sdk";
@@ -287,10 +326,9 @@ const steps = mergeActivities(events).map(describeEvent);
 // "Submitted the plan · 2 actions"
 ```
 
-`activityId` is only unique **within an attempt**: a retry restarts the agent
-loop and the numbering with it, so a run that was retried has one `a1` per
-attempt. Keying on the id alone folds the second attempt's first activity into
-the first attempt's row, which is why the key is the pair.
+`activityId` restarts at `a1` every time the agent loop does, so a retried run
+has one `a1` per attempt. Keying on the id alone folds the second attempt's
+first activity into the first attempt's row, which is why the key is the pair.
 
 `describeEvent()` turns `type` and `data` into one English line, falling back
 to the backend's `summary`. It is pure and has no locale option.
@@ -309,8 +347,9 @@ to the backend's `summary`. It is pure and has no locale option.
 - `signal` aborts the iteration with `OperationAbortedError`. Breaking out of
   the `for await` loop closes the connection.
 
-`timeline()` reads the same events after the fact, paging for you, and works on
-a running Analysis as well as a finished one:
+`timeline()` reads the stream after the fact, paging for you, and works on a
+running Analysis as well as a finished one. It is also the only way to see the
+Result row, so it is what a finished run's timeline should be rebuilt from:
 
 ```ts
 await inklet.analyses.wait(analysis);
@@ -346,18 +385,13 @@ function apply(rows: Map<string, string>, ev: AnalysisEvent) {
 }
 ```
 
-If the client instead re-reads the timeline on reconnect, do the same in one
-call before rendering:
-
-```ts
-const rows = mergeActivities(events).map((ev) => ({ seq: ev.seq, text: describeEvent(ev) }));
-```
+If the client instead re-reads the timeline on reconnect, `mergeActivities()`
+does the same thing in one call before rendering.
 
 In browser code, read that relay with `fetch` plus `ReadableStream`, not
-`EventSource`. `EventSource` cannot set request headers — no `Authorization`,
-no `Last-Event-ID` of your choosing — cannot send a body, and gives you no
-access to the response status or content type, so it cannot tell a stream that
-a proxy has downgraded from a real one. Reading the body yourself is what lets
+`EventSource`: `EventSource` cannot set request headers, cannot send a body,
+and hides the response status and content type, so it cannot tell a real
+stream from one a proxy has downgraded. Reading the body yourself is what lets
 the SDK fall back to polling and resume from the last `seq`, and the same
 applies to your relay:
 
@@ -389,9 +423,21 @@ const { changed } = await inklet.displays.advance(displayId);
 
 `setCurrent()` accepts a Presentation of yours that has already been delivered
 to this Display and finished rendering; anything else is a `ConflictError` with
-`code: "presentation_not_deliverable"`. `advance()` moves to the next queued
-Presentation and returns `changed: false` when the queue is empty, which is a
-normal result, not an error.
+`code: "presentation_not_deliverable"`. `error.details` carries
+`{ displayId, presentationId, reason }`, and `reason` is the machine-readable
+half — branch on it rather than on the message:
+
+| `details.reason` | What it means |
+| --- | --- |
+| `targetless` | A generated Presentation. It has no panel to go back to. |
+| `not_delivered` | Never delivered to any Display. |
+| `other_display` | Delivered, but to a different Display. |
+| `not_rendered` | Delivered here, but the image is not rendered yet. |
+
+A Presentation belonging to someone else is `403`, not this conflict.
+`advance()` picks the next queued Presentation instead of naming one, so it
+never raises this; it returns `changed: false` when the queue is empty, which
+is a normal result, not an error.
 
 The Presentation that was on the panel becomes `expired` rather than going back
 into the queue, so `displays.listQueue()` always means "not shown yet". To go
@@ -436,6 +482,12 @@ const rendition = await inklet.presentations.render(presentation.id, {
 `default`, `macos-widget-small`, `macos-widget-medium`, and
 `macos-widget-large`.
 
+A generated Presentation is never queued, published, confirmed, or expired —
+it is `preparing`, `ready`, or `failed` — so a `scope: "generated"` list, which
+is what a bare `presentations.list()` is, rejects any other `state` with
+`invalid_request`. Under `scope: "all"` the same filter simply matches nothing
+on the generated half.
+
 ## Push helpers
 
 `inklet.push.*` are one-call wrappers over `contents.upload()` followed by
@@ -457,9 +509,8 @@ await inklet.push.manual({ displayId, assets: [image, inklet.assets.text("This w
 await inklet.push.hardcode({ displayId, image });
 ```
 
-Each helper returns the Content, the Analysis, and the idempotency key it used
-for both. When `idempotencyKey` is omitted the SDK generates one; supply your
-own for caller-controlled retries.
+Each helper returns the Content, the Analysis, and the one idempotency key it
+used for both — pass your own `idempotencyKey` for caller-controlled retries.
 
 ## Content lifecycle
 
@@ -486,8 +537,8 @@ and structured details are preserved.
 import {
   AuthenticationFailedError,
   InkletError,
+  PermissionDeniedError,
   RateLimitError,
-  SubscriptionRequiredError,
 } from "@inklethq/sdk";
 
 try {
@@ -495,15 +546,51 @@ try {
 } catch (error) {
   if (error instanceof AuthenticationFailedError) {
     // Replace or reactivate the PAT.
-  } else if (error instanceof SubscriptionRequiredError) {
+  } else if (
+    error instanceof PermissionDeniedError &&
+    error.code === "plan_upgrade_required"
+  ) {
     // Upgrade in the Inklet portal, then retry with the same PAT.
   } else if (error instanceof RateLimitError) {
-    // Retry according to your application policy.
+    // Back off, or wait for details.resetAt when an allowance is spent.
   } else if (error instanceof InkletError) {
     console.error(error.code, error.requestId, error.details);
   }
 }
 ```
+
+The class comes from the HTTP status; `code` and `details` come from the
+backend and are the stable parts. `message` is written for a human reading a
+log and is not a contract — never branch on it.
+
+| Status · `code` | SDK error | Raised by |
+| --- | --- | --- |
+| 400 `invalid_request` | `ApiError` | A bad field, cursor, or id; `displayId` with `scope: "generated"`; a missing or malformed `Idempotency-Key` |
+| 401 | `AuthenticationFailedError`, `RevokedSecretKeyError`, or `InvalidSecretKeyError` | Any PAT problem; the backend does not distinguish them publicly |
+| 402 `payment_required` | `ApiError` | The subscription's payment failed |
+| 403 `access_denied` | `PermissionDeniedError` | The resource belongs to someone else |
+| 403 `plan_upgrade_required` | `PermissionDeniedError` | A Pro-only operation on the Free plan |
+| 404 `*_not_found` | `NotFoundError` | Unknown Display, Content, Analysis, Presentation, or run archive |
+| 409 `idempotency_conflict` | `ConflictError` | The same key with a different body |
+| 409 `presentation_not_deliverable` | `ConflictError` | `setCurrent()`; see `details.reason` above |
+| 409 `analysis_in_progress` | `ConflictError` | Too many Analyses already queued for this user |
+| 413 `asset_too_large` | `PayloadTooLargeError` | An Asset over the size limit |
+| 422 `no_compatible_display` | `ApiError` | `analyze()` with no `target` and no usable Display |
+| 429 `quota_exceeded` | `RateLimitError` | A plan allowance is spent; `details` carries `quota`, `limit`, `used`, and `resetAt` |
+| 429 `rate_limited` | `RateLimitError` | Too many requests; back off and retry |
+
+`quota_exceeded` and `rate_limited` share a class and mean different things:
+back-off clears one, and only time or an upgrade clears the other, which is
+what `details.resetAt` is for.
+
+Anything else keeps the backend's `code` on an `ApiError`, so a code this table
+does not list is still readable rather than swallowed. `SubscriptionRequiredError`
+is still exported and still matches `code: "subscription_required"`, but current
+backends refuse a plan-gated call with `plan_upgrade_required` or
+`payment_required` instead. Errors raised before a request goes out are
+`ConfigurationError`; `AnalysisFailedError`, `NoChangeError`,
+`OperationTimeoutError`, and `OperationAbortedError` come from the waiting
+helpers rather than from a response.
 
 Authenticated requests refuse absolute URLs and cross-origin redirects.
 Credentials are redacted from errors, and storage uploads never include the

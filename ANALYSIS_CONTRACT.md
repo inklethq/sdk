@@ -1,6 +1,13 @@
 # inklet Analysis 契约（Content → Analysis → Presentation）
 
-状态：给后端实现参考的契约草案，配套 SDK 分支 `feat/revised-ai-analyze`。
+> **状态：历史设计契约，已由实现取代。** 这是 2026-09-13 交给后端的一次性实现
+> 交底，不是现行接口文档，不要拿它当接口来写代码。现行口径以这三份为准：
+>
+> - SDK 公开表面 —— 本仓库的 [`README.md`](README.md) 与 [`CHANGELOG.md`](CHANGELOG.md)；
+> - 后端接口 —— backend 仓库 `docs/api/sdk-v1.md`；
+> - targetless 输出 —— backend 仓库 `docs/api/targetless-presentations.md`。
+>
+> 正文按原样保留以备查阅。与实现冲突时以代码为准。
 
 日期：2026-09-13
 
@@ -8,6 +15,50 @@
 模型，并把 `TARGETLESS_PRESENTATIONS_CONTRACT.md` 的 targetless 输出收编为 Analysis 的一种目标。
 Display、Presentation、队列、current-presentation、上传票据、Scene v1、renditions 的既有契约
 不变。
+
+## 0. 写完之后变了什么
+
+只列在代码里核对过的差异。
+
+- **分析事件有了可见性。** 每条事件带 `visibility public|internal`，公开读只返回
+  public 的那一档，而且是一个 16 个类型的闭集：`analysis.created` /
+  `dispatched` / `leased` / `lease_expired` / `completed` / `failed`、
+  `context.materialized`、`agent.activity`、`plan.submitted` / `rejected` /
+  `accepted`、`render.finished` / `failed`、`delivery.published` / `confirmed` /
+  `failed`。`turn.*`、`tool.*`、`kernel.*`、`assistant.note`、`plan.validated`
+  以及所有 `detail` 负载只在内部；公开端点上带 `?detail=` 返回
+  `400 invalid_request`。公开的 `seq` 单调但**不连续**（内部事件占掉号）。每条
+  公开事件带一句英文 `summary`。
+- **新增 `agent.activity`**：合并过的 agent 进度，不是工具调用。
+  `{ activityId, kind, state, steps, stats }`，同一条活动随进展被节流着重复下发，
+  所以客户端要按 `attempt:activityId` 合并——`activityId` 只在一次 attempt 内唯一
+  （SDK 导出 `mergeActivities`）。
+- **事件读取端点**：`GET /analyses/{id}/events`（分页）与
+  `GET /analyses/{id}/events/stream`（SSE）。SSE 在分析进入终态后发 `event: end`
+  并关闭，**渲染与交付的事件发生在终态之后，流里看不到它们**，要用分页回放。
+  另有一个内部专用的全量读，不属于公开表面。
+- **`GET /presentations` 新增 `displayId` 过滤**：省略 `scope` 时 `displayId` 蕴含
+  `scope=display`（不带 `displayId` 时默认仍是 `generated`）；`displayId` 与
+  `scope=generated` 同时出现 → `400 invalid_request`。
+- **响应新增 `historyWindowStart`**：历史深度额度的下界，RFC3339 UTC 或 `null`。
+  FREE 7 天、PRO 不限。同一条地板也落在 `POST /analyses` 上：`scope.since` 在
+  **创建时**被抬到地板，`scope.since` 原样回显、`scope.sinceAt` 是实际窗口——
+  裁剪，不是拒绝。
+- **`Presentation` 新增 `title`**（接受计划时解析，回退链见后端
+  `internal/analysis/title.go`）。
+- **`no_compatible_display` 变成同步的 422**（见下面 §5.1 与 §8 的订正）。
+- **切屏的 409 带机器码**：`POST /displays/{displayId}/current` 的
+  `409 presentation_not_deliverable` 带 `details = { displayId, presentationId,
+  reason }`，`reason ∈ targetless | not_delivered | other_display |
+  not_rendered`。`advance` 不会产生这个 409。
+- **`plan.rejected.data`** 是 `{ problems: <条数>, reason, attempt }`，
+  `reason ∈ target | layout_mismatch | content_refs | schema | other`；问题原文
+  只在内部，公开读只给条数。
+- **§9「兼容旧 v0.1 SDK」整节作废。** `POST /contents/{contentId}/confirm` 已从
+  路由里移除（请求落到 facade 的 404，不是 409、也不是 410）；SDK 专用的 SQS 队列
+  `inklet-sdk-content` / `inklet-sdk-analysis` 与 `SQS_SDK_CONTENT_URL` /
+  `SQS_SDK_ANALYSIS_URL` 不再被任何代码读取；python worker 的 `sdk-analysis` 模式
+  已下线。SDK 的 Analysis 现在跑在 worker-agent 上。
 
 ## 1. 目标
 
@@ -165,7 +216,11 @@ Idempotency-Key: 必填
 
 - `displayId` / `displayIds`：固定目标，后端必须同步校验归属；agent 不得替换或增删目标。
 - `output`：targetless。语义、preset 注册表、viewport 规则同 `TARGETLESS_PRESENTATIONS_CONTRACT.md` §4。不产生 Delivery，不发 MQTT。
-- `null`：agent 自选一台或多台兼容 Display；没有可用 Display 时 Analysis `failed`，`failure.code = no_compatible_display`。
+- `null`：agent 自选一台或多台兼容 Display。~~没有可用 Display 时 Analysis `failed`，`failure.code = no_compatible_display`。~~
+  **订正（已实现）**：没有可用 Display 时不再收下再异步失败，而是当场
+  `422 no_compatible_display`——在预留额度与落行之前，幂等键也会被释放，调用方绑
+  完屏可以用同一个键重试。`target.output` 不受此限；显式点名的 `displayId` /
+  `displayIds` 由归属校验用 404 / 403 / `display_incompatible` 回答。
 
 校验规则：
 
@@ -265,7 +320,19 @@ GET /analyses?contentId=&state=&trigger=&cursor=&limit=
 异步失败码（`Analysis.failure.code`）：`no_compatible_display`、`display_incompatible`、
 `processing_unavailable`、`invalid_asset`、`internal_error`。
 
-## 9. 兼容旧 v0.1 SDK
+**订正（已实现）**：`no_compatible_display` 现在首先是 `POST /analyses` 的**同步
+422**（见 §5.1）。另外实现里还有 `409 presentation_not_deliverable`
+（`POST /displays/{displayId}/current`，带 `details.reason`）与
+`400 invalid_request`（`Idempotency-Key` 缺失或不合法、`?detail=`、`displayId`
+与 `scope=generated` 同时出现）；套餐类拒绝用的是 `plan_upgrade_required`（403）、
+`payment_required`（402）与 `quota_exceeded`（429），不是本表设想的
+`subscription_required`。
+
+## 9. 兼容旧 v0.1 SDK（已作废）
+
+> **本节整节没有实现。** `POST /contents/{contentId}/confirm` 已从路由里移除，
+> 旧的 `mode` + confirm 链路不存在，`/api/raw-items/*` 的适配层也不在现行 SDK
+> facade 里。保留原文只为说明当时的打算。
 
 - `POST /contents` 带 `mode` 时：按旧语义创建 Content，并在 `POST /contents/{id}/confirm` 成功后自动创建一条
   `trigger = api` 的 Analysis（`mode` 映射：auto → `ai` + `target = null`；manual → `ai` + `{displayId}`；

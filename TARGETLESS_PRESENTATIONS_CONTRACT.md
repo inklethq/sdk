@@ -1,6 +1,64 @@
 # inklet Targetless Presentation Contract
 
-Status: implementation handoff for the backend service
+> **Status: historical design contract, superseded by the implementation.**
+> This is the v0.1.x handoff that introduced Display-less generation. Scene v1,
+> the preset registry, and the rendition model landed close to what is written
+> here; the *entry point* did not — targetless output is now a property of an
+> Analysis, not of a Content. Read the live references instead:
+>
+> - SDK surface — [`README.md`](README.md) and [`CHANGELOG.md`](CHANGELOG.md)
+>   in this repository;
+> - backend API — `docs/api/targetless-presentations.md` and
+>   `docs/api/sdk-v1.md` in the backend repository;
+> - the design step in between — [`ANALYSIS_CONTRACT.md`](ANALYSIS_CONTRACT.md),
+>   itself historical.
+>
+> The body is kept verbatim for reference. Where it disagrees with the code,
+> the code wins.
+
+## 0. What changed since this was written
+
+Only deltas verified against the current code.
+
+- **`output` moved from Content to Analysis** (§4). `POST /contents` no longer
+  accepts `mode`, `displayId`, `intent`, or `output`; a targetless run is
+  `POST /analyses` with `target: { output }`. `mode` is now `ai` / `direct`,
+  so "`mode=auto` / `mode=hardcode` targetless" reads as `ai` / `direct` with
+  an `output` target, and "`manual + output` is rejected" is replaced by the
+  rule that a `target` holds exactly one of `displayId`, `displayIds`, or
+  `output`. In the SDK this is `presentations.generate()`.
+- **There is no Content confirmation step** (§5, §11 step 3, §12). The
+  `POST /contents/{id}/confirm` endpoint was removed and is not routed;
+  uploads are verified by storage events or lazily when an Analysis first
+  references the Content. §11's macOS path is `POST /contents` → upload →
+  `POST /analyses` → poll `GET /analyses/{id}` → retrieve the Presentation.
+- **`GET /presentations` gained `displayId` and `historyWindowStart`** (§8).
+  `scope` still defaults to `generated`, but `displayId` implies
+  `scope=display` when `scope` is omitted, and `displayId` with
+  `scope=generated` is `400 invalid_request`. `historyWindowStart` reports the
+  plan's Display-history floor (RFC3339 UTC, or `null` — a generated-only read
+  has no Display half to clamp). A generated Presentation's `state` is only
+  ever `preparing`, `ready`, or `failed`, and any other `state` filter on a
+  generated list is a `400`.
+- **The Presentation response gained `title`, `analysisId`, and role-tagged
+  `contentIds`** (§7). `contentIds` is an ordered list of `{ id, role }` with
+  `role` of `input` or `context`; `mode` is `ai` / `direct` rather than
+  `auto` / `manual` / `hardcode`.
+- **Free-tier refusal is not `subscription_required`** (§12). The entitlement
+  layer publishes `plan_upgrade_required` (403), `payment_required` (402), and
+  `quota_exceeded` (429). The gating itself is unchanged: the AI path is Pro,
+  the no-AI path stays Free.
+- **`POST /analyses` requires an `Idempotency-Key`**, unlike
+  `POST /presentations/{id}/renditions`, where §8 already called it optional
+  and where it remains optional.
+- **`no_compatible_display` never applies to a targetless run.** An Analysis
+  with no `target` at all is refused at creation with `422
+  no_compatible_display` when the account has no usable Display; a
+  `target: { output }` run is exempt, which is the point of §1.
+- **New since this was written**, and unrelated to targetless output but worth
+  knowing when reading §10: an Analysis publishes a public event stream
+  (`GET /analyses/{id}/events`, plus an SSE variant), and manual Display
+  switching exists (`POST /displays/{id}/current`, `POST /displays/{id}/advance`).
 
 Target SDK release: v0.1.x
 
@@ -54,6 +112,13 @@ The targetless endpoints are Pro-gated when `mode=auto`. Targetless Hardcode
 remains Free and preserves the current stretch-to-output behavior.
 
 ## 4. Extend Content creation
+
+> **Superseded.** `POST /contents` takes only `title` and `assets`. Everything
+> below that hangs off the request body — `mode`, `displayId`, `intent`,
+> `output` — now belongs to `POST /analyses`, where `target: { output }`
+> selects targetless generation. The output rules themselves (formats,
+> preset/viewport exclusivity, the preset registry, the normalized profile) are
+> unchanged and are validated on the Analysis target.
 
 Existing endpoint:
 
@@ -142,7 +207,8 @@ idempotency, Content states, warnings, and errors retain the current contract.
 
 ### Auto targetless generation
 
-After Content confirmation:
+After Content confirmation (**now: once `POST /analyses` accepts the run —
+there is no confirm step**):
 
 1. verify uploaded assets;
 2. fetch links;
@@ -423,8 +489,11 @@ The macOS app uses `/api/app/v1` with its existing access token:
 
 1. `POST /contents` with `output.preset=macos-widget-medium`;
 2. upload binary assets to returned tickets without Authorization;
-3. `POST /contents/{id}/confirm`;
-4. poll `GET /contents/{id}` until `ready` or `failed`;
+3. ~~`POST /contents/{id}/confirm`~~ — **removed**; the step is now
+   `POST /analyses` with `target.output.preset=macos-widget-medium`, and
+   step 1 carries no `output`;
+4. poll `GET /contents/{id}` until `ready` or `failed` — now
+   `GET /analyses/{id}` until `completed` or `failed`;
 5. retrieve its one Presentation;
 6. download the best matching PNG rendition immediately;
 7. store PNG and Scene JSON in the shared Widget App Group;

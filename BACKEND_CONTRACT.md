@@ -1,5 +1,82 @@
 # Inklet SDK v0.1 Backend Contract
 
+> **Status: historical design contract, superseded by the implementation.**
+> This is the one-off v0.1 handoff written for the backend team on 2026-08-05.
+> It is not an API reference, and large parts of it — the Content `mode`, the
+> confirm step, the `processing` block — were never built or have since been
+> removed. Read the live references instead:
+>
+> - SDK surface — [`README.md`](README.md) and [`CHANGELOG.md`](CHANGELOG.md)
+>   in this repository;
+> - backend API — `docs/api/sdk-v1.md` in the backend repository;
+> - targetless output — `docs/api/targetless-presentations.md` there too;
+> - the design step between this and today — [`ANALYSIS_CONTRACT.md`](ANALYSIS_CONTRACT.md),
+>   itself historical.
+>
+> The body is kept verbatim for reference. Where it disagrees with the code,
+> the code wins.
+
+## 0. What changed since this was written
+
+Only deltas verified against the current code.
+
+- **Content no longer carries processing.** `mode`, `displayId`, `intent`,
+  `processing`, and the `processing` state are gone from Content (§6.3, §7.2).
+  A Content is just `title` plus Assets, with states `pending | ready | failed`,
+  and an **Analysis** carries `mode` (`ai` / `direct`), `context`, `scope`,
+  `target`, `intent`, and `title`. `auto` / `manual` / `hardcode` survive only
+  as SDK helper names.
+- **`POST /contents/{contentId}/confirm` is removed** (§7.2). It is not routed
+  at all, so a call lands on the facade's 404 — there is no confirm step, and
+  uploads are verified by storage events or lazily when an Analysis first
+  references the Content. `POST /contents/{contentId}/upload-tickets` is kept.
+- **New endpoints** not in this document: `POST /analyses`, `GET /analyses`,
+  `GET /analyses/{id}`, `GET /analyses/{id}/events`,
+  `GET /analyses/{id}/events/stream` (SSE), `GET /analyses/{id}/archive`,
+  `GET /presentations` (list), `POST /presentations/{id}/renditions`,
+  `POST /displays/{displayId}/current`, and `POST /displays/{displayId}/advance`.
+  The last two make §13's "no queue mutation, no replay" out-of-scope line
+  obsolete for manual switching, though the queue itself is still read-only.
+- **`Idempotency-Key` is required on `POST /analyses` as well as
+  `POST /contents`** (§5.4), with the same 8–128 printable-ASCII rule. Keys are
+  scoped per route, so one key covers one Content plus one Analysis. A missing
+  or malformed key is `400 invalid_request`; a reused key with a different body
+  is `409 idempotency_conflict`; the window is 24 hours. On
+  `POST /presentations/{id}/renditions` the header is optional.
+- **`no_compatible_display` is a synchronous `422` on `POST /analyses`** when
+  the request names no `target` and the account has no usable Display. §9
+  already listed the code; what changed is that it is raised at creation,
+  before any quota is reserved, rather than only as an async failure.
+- **New `409 presentation_not_deliverable`** on `POST /displays/{id}/current`,
+  with `details = { displayId, presentationId, reason }` and
+  `reason ∈ targetless | not_delivered | other_display | not_rendered`.
+  `advance()` never raises it; an empty queue is a `200` with
+  `changed: false`.
+- **Plan-gated refusals are not `subscription_required`.** The entitlement
+  layer publishes `plan_upgrade_required` (403), `payment_required` (402), and
+  `quota_exceeded` (429, with `details.limit`, `used`, and `resetAt`).
+- **Presentations gained `title`, `analysisId`, `scene`, `renditions`, and
+  `output`;** `contentIds` is now an ordered list of `{ id, role }` refs
+  (`input` or `context`) rather than bare UUIDs, and `mode` is `ai` / `direct`
+  (§6.4). `image` remains for Display Presentations.
+- **`GET /presentations` filters by Display.** `displayId` implies
+  `scope=display` when `scope` is omitted (the default is otherwise
+  `generated`), and `displayId` with `scope=generated` is
+  `400 invalid_request`. The page also returns `historyWindowStart`, the
+  plan's history-depth floor as RFC3339 UTC or `null` — Free sees 7 days of
+  Display Presentations, Pro sees all of them, and the list clamps instead of
+  refusing.
+- **An Analysis publishes an event stream**, of which the public half is a
+  closed set of sixteen types with an English `summary`, a monotonic but
+  **non-contiguous** `seq`, and no `detail` at any depth (`?detail=` is a
+  `400`). `agent.activity` reports coalesced agent progress. Render and
+  delivery events are written after the Analysis is already terminal, so they
+  appear in the paged read but never on the SSE stream.
+- **Retired plumbing.** The SDK-specific SQS queues `inklet-sdk-content` and
+  `inklet-sdk-analysis`, their `SQS_SDK_CONTENT_URL` / `SQS_SDK_ANALYSIS_URL`
+  settings, and the Python worker's `sdk-analysis` mode are all gone. SDK
+  Analyses run in worker-agent.
+
 > Handoff document for the backend implementation agent.
 >
 > Baseline reviewed on 2026-08-05:
@@ -505,7 +582,12 @@ Response `201`:
 - The caller uploads multipart fields followed by the `file` field directly to S3.
 - The PAT must never be sent to the presigned upload origin.
 
-#### `POST /api/sdk/v1/contents/{contentId}/confirm`
+#### `POST /api/sdk/v1/contents/{contentId}/confirm` — removed
+
+> **Not implemented, and not a route.** There is no confirm step: uploads are
+> verified by storage events, or lazily when an Analysis first references the
+> Content. A call to this path gets the facade's `404`. Processing starts with
+> `POST /analyses`, not here.
 
 Verify all binary assets with S3 and start processing.
 

@@ -122,6 +122,14 @@ onto the run. Everything in this release follows from that.
   exponential back-off), and falls back to polling `listEvents()` when an
   intermediate proxy answers with something other than `text/event-stream`.
   `signal` aborts with `OperationAbortedError`.
+- Document that `watch()` ends at the terminal state and therefore does not
+  yield `render.*` or `delivery.*`: those are written after the Analysis is
+  already `completed`, and a Presentation waiting on an offline panel can take
+  days to confirm. `timeline()` and `listEvents()` return them.
+- Document `422 no_compatible_display`: an `analyze()` with no `target` asks
+  the agent to pick a Display, so an account with none is refused at creation
+  rather than running a full pass and failing with a Content-shaped code. It
+  surfaces as `ApiError` with that `code`, and `target: { output }` is exempt.
 - Add `InkletClient.requestRaw()`, which returns the raw `Response` for
   streaming endpoints, and a matching `requestRaw` on the internal resource
   transport. `request()` now keeps a caller-supplied `accept` header, and an
@@ -141,8 +149,11 @@ onto the run. Everything in this release follows from that.
   `DisplayAdvanceResult` and `WaitUntilCurrentOptions`. Both writes land on
   `pendingPresentationId` until the panel confirms, replace the previous image
   with an `expired` one rather than requeueing it, and consume no AI or push
-  quota. A Presentation that cannot be shown returns `ConflictError` with
-  `code: "presentation_not_deliverable"`.
+  quota. A Presentation `setCurrent()` cannot show returns `ConflictError` with
+  `code: "presentation_not_deliverable"` and `details.reason` — `targetless`,
+  `not_delivered`, `other_display`, or `not_rendered` — so a UI can say which
+  rule was broken without matching on the message. `advance()` picks from the
+  queue and never raises it.
 - Split Analysis scope: requests take `AnalysisScopeInput { since }` and only
   `since` is sent; responses carry `AnalysisScope { since, sinceAt }`, the
   absolute window the backend resolved when the Analysis was created.
@@ -154,6 +165,13 @@ onto the run. Everything in this release follows from that.
 - Decouple upload from processing: `contents.upload()` stores Content without
   running AI; `inklet.analyze()` / `inklet.direct()` start an Analysis over
   `contentIds` and/or the user's history and produce Presentations.
+- `POST /analyses` requires an `Idempotency-Key`, so `analyze()`, `direct()`,
+  and `analyses.create()` always send one: the caller's `idempotencyKey` when
+  given, otherwise a generated `sdk-<uuid>`. Keys are validated locally as 8 to
+  128 printable ASCII characters without spaces, the same rule `POST /contents`
+  already used, and are scoped per route — which is why `push.*` and
+  `presentations.generate()` cover their Content and their Analysis with one
+  key and return it.
 - Add `context: "submitted" | "history"`, `scope.since`, and `target`
   (agent-selected, pinned Displays, or software-only `output`) to Analysis.
 - Add `analyses.wait()`, `analyses.list()`, `no_change` outcomes,
