@@ -519,3 +519,20 @@ npm run pack:check
 
 `npm run check` builds ESM and CommonJS output, runs strict TypeScript checks,
 and executes the test suite.
+
+## CI
+
+Every pull request and every push to `main` runs four checks on GitHub Actions.
+
+| Check | What it does | Run it locally |
+| --- | --- | --- |
+| `Node.js 20` / `22` / `24` | `npm ci`, then `npm run check` and `npm run pack:check` on each supported release | `npm ci && npm run check && npm run pack:check` |
+| `Dependency audit` | Reports advisories rated high or critical. Advisory only: it never fails the build | `npm audit --audit-level=high` |
+| `Analyze JavaScript and TypeScript` | CodeQL security queries, also on a weekly schedule | — |
+| `gitleaks` | Scans the full commit history for leaked credentials | `docker run --rm -v "$PWD:/repo:ro" ghcr.io/gitleaks/gitleaks:v8.30.1 git /repo --config /repo/.gitleaks.toml --redact` |
+
+The Node.js matrix covers the whole range the package claims in `engines`.
+
+`.gitleaks.toml` silences the fake PATs and idempotency keys used as fixtures,
+each scoped to the single rule it trips. Never add a real credential to that
+allowlist: revoke it and rewrite the history instead.

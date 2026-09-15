@@ -1,0 +1,25 @@
+# Gitleaks configuration for @inklethq/sdk.
+#
+# The upstream default rules are kept in full. Every entry below silences one
+# known placeholder shape that lives in tests and documentation, and each is
+# scoped to the rule it trips so that a genuine credential in the same file is
+# still reported. Never allowlist a real credential here: revoke it instead.
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Fake personal access tokens used as test and documentation fixtures"
+targetRules = ["generic-api-key"]
+regexTarget = "line"
+regexes = [
+  '''(il|inklet)_pat_(test|typecheck)[A-Za-z0-9_-]*''',
+]
+
+[[allowlists]]
+description = "Idempotency keys identify a retried request; they are not credentials"
+targetRules = ["generic-api-key"]
+regexTarget = "line"
+regexes = [
+  '''idempotency[-_]?[Kk]ey["']?\s*[:=]\s*["'][A-Za-z0-9_-]+["']''',
+]
