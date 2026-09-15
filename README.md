@@ -222,11 +222,11 @@ for await (const ev of inklet.analyses.watch(analysis.id)) {
 ```
 
 The stream is a progress report, not the run's log. It answers *where is this
-now*, and it is a closed set of fifteen types:
+now*, and it is a closed set of sixteen types:
 
 | Stage | Types |
 | --- | --- |
-| Accepted | `analysis.created` · `analysis.dispatched` · `analysis.leased` |
+| Accepted | `analysis.created` · `analysis.dispatched` · `analysis.leased` · `analysis.lease_expired` |
 | Working | `context.materialized` · `agent.activity` |
 | Planning | `plan.submitted` · `plan.rejected` · `plan.accepted` |
 | Result | `render.finished` · `render.failed` · `delivery.published` · `delivery.confirmed` · `delivery.failed` |
@@ -272,10 +272,10 @@ step: `{ activityId, kind, state, steps, stats }`, where `kind` is
 sending zeros.
 
 The same `activityId` arrives several times as the activity runs: throttled
-`active` updates, then a final `done` or `failed`. **Upsert by `activityId`**
-instead of appending, or hand the list to `mergeActivities()`, which keeps each
-activity at the position it first appeared and replaces it with its latest
-state:
+`active` updates, then a final `done` or `failed`. **Upsert by `attempt` and
+`activityId` together** instead of appending, or hand the list to
+`mergeActivities()`, which keeps each activity at the position it first
+appeared and replaces it with its latest state:
 
 ```ts
 import { describeEvent, mergeActivities } from "@inklethq/sdk";
@@ -286,6 +286,11 @@ const steps = mergeActivities(events).map(describeEvent);
 // "Chose Daily Summary"
 // "Submitted the plan · 2 actions"
 ```
+
+`activityId` is only unique **within an attempt**: a retry restarts the agent
+loop and the numbering with it, so a run that was retried has one `a1` per
+attempt. Keying on the id alone folds the second attempt's first activity into
+the first attempt's row, which is why the key is the pair.
 
 `describeEvent()` turns `type` and `data` into one English line, falling back
 to the backend's `summary`. It is pure and has no locale option.
@@ -329,11 +334,14 @@ run `watch()` on your server and relay events to the client over your own
 channel (SSE, WebSocket, or whatever the Portal already uses).
 
 Merge on whichever side owns the list. On the browser side that is an upsert
-keyed by `activityId`, so a late `active` update never appends a second row:
+keyed by `attempt` and `activityId`, so a late `active` update never appends a
+second row and a retry never overwrites the attempt before it:
 
 ```ts
 function apply(rows: Map<string, string>, ev: AnalysisEvent) {
-  const key = isAnalysisEvent(ev, "agent.activity") ? ev.data.activityId : String(ev.seq);
+  const key = isAnalysisEvent(ev, "agent.activity")
+    ? `${ev.attempt}:${ev.data.activityId}`
+    : String(ev.seq);
   rows.set(key, describeEvent(ev));
 }
 ```

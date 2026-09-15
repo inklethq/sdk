@@ -43,6 +43,7 @@ export type AnalysisEventType =
   | "analysis.created"
   | "analysis.dispatched"
   | "analysis.leased"
+  | "analysis.lease_expired"
   | "analysis.completed"
   | "analysis.failed"
   | "context.materialized"
@@ -90,7 +91,8 @@ export interface AgentActivityStats {
  *
  * The same `activityId` arrives several times as the activity progresses:
  * throttled `active` updates, then a final `done` or `failed`. Upsert by
- * `activityId` rather than appending, or use {@link mergeActivities}.
+ * `attempt` and `activityId` together rather than appending, or use
+ * {@link mergeActivities}.
  */
 export interface AgentActivityData {
   /** Stable for the life of one activity, unique within an `attempt`. */
@@ -141,6 +143,20 @@ export interface AnalysisCompletedData {
 export interface AnalysisFailedData {
   /** The backend failure code, the same one `Analysis.failure.code` carries. */
   code: string;
+}
+
+/**
+ * A worker's lease ran out before it returned a result.
+ *
+ * This reads like the end and is not: the attempt is abandoned, the run is
+ * handed back out, and the agent starts again from the top. The event is
+ * `warn`, the Analysis stays `running`, and two of these followed by another
+ * `analysis.leased` means "retried twice, still going" — not a run to tell
+ * anyone to retry.
+ */
+export interface AnalysisLeaseExpiredData {
+  /** The attempt that timed out; the next one carries `attempt + 1`. */
+  attempt: number;
 }
 
 /** Counts of what the agent was given to work with. */
@@ -215,6 +231,7 @@ export type AnalysisEvent =
   | AnalysisEventOf<"analysis.created", Record<string, unknown>>
   | AnalysisEventOf<"analysis.dispatched", Record<string, unknown>>
   | AnalysisEventOf<"analysis.leased", Record<string, unknown>>
+  | AnalysisEventOf<"analysis.lease_expired", AnalysisLeaseExpiredData>
   | AnalysisEventOf<"analysis.completed", AnalysisCompletedData>
   | AnalysisEventOf<"analysis.failed", AnalysisFailedData>
   | AnalysisEventOf<"context.materialized", ContextReadyData>
@@ -240,7 +257,7 @@ export type AnalysisEventWithType<T extends AnalysisEventType> = Extract<
  *
  * ```ts
  * if (isAnalysisEvent(event, "agent.activity")) {
- *   upsert(event.data.activityId, event.data.state);
+ *   upsert(`${event.attempt}:${event.data.activityId}`, event.data.state);
  * }
  * ```
  */
@@ -415,13 +432,20 @@ export async function retrieveAnalysisArchive(
 }
 
 /**
- * Collapse every `agent.activity` to its latest state, keyed by `activityId`.
+ * Collapse every `agent.activity` to its latest state, keyed by `attempt` and
+ * `activityId` together.
  *
  * One activity reports itself several times — throttled `active` updates and
  * then `done` or `failed` — so a raw list renders the same row over and over.
  * Each activity keeps the position of its first appearance, so the order still
  * reads as the order things started, and every other event is passed through
  * untouched.
+ *
+ * **`activityId` is only unique within an attempt.** It restarts at `a1` every
+ * time the agent loop restarts, so a retried run has one `a1` per attempt and
+ * keying on the id alone would fold attempt two's first activity into attempt
+ * one's row. The attempt is part of the key, which leaves a retry reading as
+ * the second pass it was.
  *
  * ```ts
  * const events = mergeActivities(await collect(inklet.analyses.timeline(id)));
@@ -438,9 +462,10 @@ export function mergeActivities(
       merged.push(event);
       continue;
     }
-    const at = positions.get(event.data.activityId);
+    const key = `${event.attempt}:${event.data.activityId}`;
+    const at = positions.get(key);
     if (at === undefined) {
-      positions.set(event.data.activityId, merged.length);
+      positions.set(key, merged.length);
       merged.push(event);
       continue;
     }
@@ -471,9 +496,7 @@ export function describeEvent(event: AnalysisEvent): string {
     return describePlanSubmitted(event.data);
   }
   if (isAnalysisEvent(event, "plan.rejected")) {
-    const { problems, reason } = event.data;
-    const what = PLAN_REJECTED_PHRASES[reason];
-    return `Plan sent back · ${count(problems, "problem")}${what === "" ? "" : ` with ${what}`}`;
+    return describePlanRejected(event.data);
   }
   if (isAnalysisEvent(event, "plan.accepted")) {
     return `Plan accepted · ${count(event.data.presentationIds.length, "Presentation")}`;
@@ -485,6 +508,10 @@ export function describeEvent(event: AnalysisEvent): string {
   }
   if (isAnalysisEvent(event, "analysis.failed")) {
     return `Failed · ${event.data.code}`;
+  }
+  if (isAnalysisEvent(event, "analysis.lease_expired")) {
+    // What happens next, not that it stopped: the run is handed back out.
+    return `Attempt ${event.data.attempt} timed out — retrying`;
   }
   if (isAnalysisEvent(event, "render.finished")) {
     return `Rendered ${event.data.presentationId}`;
@@ -502,68 +529,121 @@ export function describeEvent(event: AnalysisEvent): string {
   return event.summary;
 }
 
+/**
+ * Why the plan came back, in the reader's terms.
+ *
+ * Every one of these ends in "trying again" because that is the fact that
+ * matters: a rejected plan is not a failed run. The worker corrects it and
+ * submits again, and the Analysis never leaves `running`.
+ */
 const PLAN_REJECTED_PHRASES: Record<PlanRejectedReason, string> = {
-  layout_mismatch: "the layout it chose",
-  target: "the Display it chose",
-  content_refs: "the Content it referred to",
-  schema: "the shape of the plan",
-  other: "",
+  target: "The plan aimed at the wrong display — trying again",
+  layout_mismatch: "The first layout didn't fit — trying another",
+  content_refs: "The plan missed some of your notes — trying again",
+  schema: "The layout details didn't validate — trying again",
+  other: "The plan was sent back — trying again",
 };
 
+function describePlanRejected(data: PlanRejectedData): string {
+  const phrase = PLAN_REJECTED_PHRASES[data.reason] ?? PLAN_REJECTED_PHRASES.other;
+  return data.problems > 0
+    ? `${phrase} (${count(data.problems, "problem")})`
+    : phrase;
+}
+
+/**
+ * The whole line for one activity: what it is doing, what its counters say,
+ * and whether it got there.
+ */
 function describeActivity(data: AgentActivityData): string {
-  const { kind, state, stats } = data;
-  if (state === "failed") {
-    return ACTIVITY_FAILED_PHRASES[kind];
-  }
+  return `${activityLine(data)}${stepSuffix(data.stats)}${
+    data.state === "failed" ? " — failed" : ""
+  }`;
+}
+
+/**
+ * What the activity is doing, or did.
+ *
+ * A `failed` activity is described by what it was *attempting* rather than by
+ * a finished sentence: "Read 3 notes — failed" contradicts itself, where
+ * "Reading your notes · 3 read — failed" is what happened. A counter that does
+ * not apply is absent rather than zero, so the line says one thing when a
+ * count is there and a different thing when it is not, instead of printing a
+ * `0` that reads as a result.
+ */
+function activityLine(data: AgentActivityData): string {
+  const { kind, state, steps, stats } = data;
   const done = state === "done";
 
   switch (kind) {
     case "reading_brief":
       return done ? "Read the brief" : "Reading the brief";
     case "reading_notes":
-      return progress(done, stats.notesRead, "note", "Reading notes", "Read");
-    case "checking_display":
-      return done ? "Checked the Display" : "Checking the Display";
-    case "choosing_layout":
-      // A chosen layout is the whole point of the activity, so it outranks the
-      // running count even while the activity is still open.
-      if (typeof stats.chosen === "string") {
-        return `Chose ${stats.chosen}`;
+      if (done) {
+        return stats.notesRead === undefined
+          ? "Read your notes"
+          : `Read ${count(stats.notesRead, "note")}`;
       }
-      return progress(
-        done, stats.layoutsSeen, "layout", "Looking at layouts", "Looked at",
-      );
+      return stats.notesRead
+        ? `Reading your notes · ${stats.notesRead} read`
+        : "Reading your notes";
+    case "checking_display":
+      return done ? "Checked the display" : "Checking the display";
+    case "choosing_layout":
+      return choosingLayoutLine(done, stats);
     case "submitting_plan":
-      return done ? "Submitted the plan" : "Submitting the plan";
+      // "Checking" while it runs, because the backend is still validating it
+      // and it may yet come back; "Submitted" only once it has gone through.
+      return done ? "Submitted the plan" : "Checking the plan";
     case "retrying":
       return done ? "Tried another layout" : "Trying another layout";
     default:
-      return done ? "Finished a step" : "Working";
+      if (steps <= 0) {
+        return done ? "Worked through it" : "Working";
+      }
+      return done
+        ? `Worked through ${count(steps, "step")}`
+        : `Working · ${count(steps, "step")}`;
   }
 }
 
-const ACTIVITY_FAILED_PHRASES: Record<AgentActivityKind, string> = {
-  reading_brief: "Could not read the brief",
-  reading_notes: "Could not read the notes",
-  checking_display: "Could not check the Display",
-  choosing_layout: "Could not settle on a layout",
-  submitting_plan: "Could not submit the plan",
-  retrying: "Could not find another layout",
-  other: "A step failed",
-};
+function choosingLayoutLine(done: boolean, stats: AgentActivityStats): string {
+  // An explicit `null` is "looked, has not settled yet", which is not a choice.
+  const chosen = typeof stats.chosen === "string" ? stats.chosen : null;
+  const seen = stats.layoutsSeen;
 
-/** `Read 3 notes` once it is over, `Reading notes · 3 so far` while it runs. */
-function progress(
-  done: boolean,
-  seen: number | undefined,
-  noun: string,
-  running: string,
-  finished: string,
-): string {
   if (seen === undefined) {
-    return done ? `${finished} the ${noun}s` : running;
+    if (chosen !== null) {
+      return `Chose ${chosen}`;
+    }
+    return done ? "Looked at the layouts" : "Looking at layouts";
   }
-  return done ? `${finished} ${count(seen, noun)}` : `${running} · ${seen} so far`;
+  if (done) {
+    const looked = `Looked at ${count(seen, "layout")}`;
+    return chosen === null ? looked : `${looked} · chose ${chosen}`;
+  }
+  // A layout it has already settled on outranks the running count: it is the
+  // answer the activity exists to produce.
+  return chosen === null ? `Looking at layouts · ${seen} so far` : `Chose ${chosen}`;
+}
+
+/**
+ * `· 1 step failed`, `· 2 steps blocked`.
+ *
+ * Blocked is not failed: it is the agent reaching for something the workspace
+ * guard will not give it, which says something different about the run and is
+ * worth its own word. Both sit before the failure marker, so a failed activity
+ * still reads as one sentence.
+ */
+function stepSuffix(stats: AgentActivityStats): string {
+  const parts: string[] = [];
+  if (stats.failedSteps) {
+    parts.push(`${count(stats.failedSteps, "step")} failed`);
+  }
+  if (stats.deniedSteps) {
+    parts.push(`${count(stats.deniedSteps, "step")} blocked`);
+  }
+  return parts.length === 0 ? "" : ` · ${parts.join(" · ")}`;
 }
 
 function describeContext(data: ContextReadyData): string {
@@ -924,6 +1004,8 @@ function parseEventData(type: string, value: unknown): Record<string, unknown> {
         outcome: expectEnum(data.outcome, ANALYSIS_OUTCOMES),
         presentations: expectSequence(data, "presentations"),
       };
+    case "analysis.lease_expired":
+      return { ...data, attempt: expectSequence(data, "attempt") };
     case "analysis.failed":
       return { ...data, code: expectString(data, "code") };
     case "render.finished":

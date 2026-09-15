@@ -19,6 +19,7 @@ import {
   type AnalysisEventSource,
   type AnalysisEventType,
   type AnalysisFailedData,
+  type AnalysisLeaseExpiredData,
   type AnalysisScope,
   type AnalysisScopeInput,
   type AnalyzeInput,
@@ -274,6 +275,10 @@ void (async () => {
       const failed: AnalysisFailedData = event.data;
       const code: string = failed.code;
       void code;
+    } else if (isAnalysisEvent(event, "analysis.lease_expired")) {
+      const expired: AnalysisLeaseExpiredData = event.data;
+      const attempt: number = expired.attempt;
+      void attempt;
     } else if (isAnalysisEvent(event, "render.finished")) {
       const render: RenderEventData = event.data;
       const presentationId: string = render.presentationId;

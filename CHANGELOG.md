@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.2.1
+
+Three corrections to the Analysis event stream, found while the Portal built
+its timeline on these types. No API is removed or renamed.
+
+- **Fix:** `mergeActivities()` keys by `attempt` **and** `activityId`, not by
+  `activityId` alone. `activityId` restarts at `a1` every time the agent loop
+  restarts, so on a retried run the old key folded attempt two's first activity
+  into attempt one's row and the retry disappeared from the timeline. Each
+  activity still keeps the position of its first appearance. Upserting by hand
+  wants the same pair: `` `${event.attempt}:${event.data.activityId}` ``.
+- Add `analysis.lease_expired` to `AnalysisEventType`, with
+  `AnalysisLeaseExpiredData` (`{ attempt }`, plus anything else the backend
+  sends, passed through untouched). It is written by the backend at `warn` when
+  a worker's lease runs out before it returns a result: the attempt is
+  abandoned and the run is handed back out, so it reads like the end and is
+  not — the Analysis stays `running` and the next `analysis.leased` carries
+  `attempt + 1`. `describeEvent()` says "Attempt 2 timed out — retrying".
+- **Changed copy:** `describeEvent()` now matches the wording the Portal
+  shows, so the two never say the same thing two ways. `agent.activity` reads
+  "Reading your notes · 3 read" / "Read 3 notes", "Checking the display" /
+  "Checked the display" (lower case: it is the object, not the type),
+  "Looking at layouts · 2 so far" / "Looked at 2 layouts · chose Daily
+  Summary", "Checking the plan" / "Submitted the plan", and "Working · 4
+  steps" / "Worked through 4 steps". A `failed` activity is described by what
+  it was attempting rather than by a finished sentence it never reached —
+  "Reading your notes · 3 read — failed", not "Could not read the notes" — and
+  `failedSteps` and `deniedSteps` append "· 1 step failed" and "· 2 steps
+  blocked" before that marker. `plan.rejected` says what the plan got wrong and
+  that it is being redone ("The first layout didn't fit — trying another (2
+  problems)") instead of "Plan sent back · 2 problems with the layout it
+  chose": a rejected plan is not a failed run. Nothing branches on these
+  strings; `type` and `data` are unchanged.
+
 ## 0.2.0
 
 The Analysis event stream is now a public progress report rather than a window

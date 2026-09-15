@@ -106,6 +106,7 @@ export {
   type AnalysisEventType,
   type AnalysisEventWithType,
   type AnalysisFailedData,
+  type AnalysisLeaseExpiredData,
   type ContextReadyData,
   type DeliveryEventData,
   type ListAnalysisEventsOptions,

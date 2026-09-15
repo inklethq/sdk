@@ -421,6 +421,13 @@ describe("SDK v1 Analysis event reads", () => {
         { outcome: "presentations", presentations: 2 },
       ],
       ["analysis.failed", { code: "no_presentable_content" }, { code: "no_presentable_content" }],
+      // `attempt` is the field this SDK is defined to read; `maxAttempts` rides
+      // along untouched, as any field a known type gained after shipping does.
+      [
+        "analysis.lease_expired",
+        { attempt: 2, maxAttempts: 3 },
+        { attempt: 2, maxAttempts: 3 },
+      ],
       ["render.finished", { presentationId: "p1" }, { presentationId: "p1" }],
       ["render.failed", { presentationId: "p1" }, { presentationId: "p1" }],
       [
@@ -516,6 +523,8 @@ describe("SDK v1 Analysis event reads", () => {
       eventFixture(1, { type: "plan.submitted", data: { outcome: "presentations" } }),
       eventFixture(1, { type: "analysis.completed", data: { outcome: "maybe" } }),
       eventFixture(1, { type: "analysis.failed", data: {} }),
+      eventFixture(1, { type: "analysis.lease_expired", data: {} }),
+      eventFixture(1, { type: "analysis.lease_expired", data: { attempt: "two" } }),
       eventFixture(1, { type: "render.finished", data: {} }),
       eventFixture(1, { type: "plan.accepted", data: { presentationIds: [1] } }),
     ]) {
@@ -681,13 +690,43 @@ describe("mergeActivities", () => {
     assert.equal(merged[2].data.stats.chosen, "Daily Summary");
   });
 
+  it("keeps each attempt's activities apart, because activityId restarts at a1", () => {
+    // A retry restarts the whole agent loop, and `activityId` with it. Keying
+    // on the id alone folds attempt two's first activity into attempt one's
+    // row, and the timeline then reads as if the retry never happened.
+    const events = [
+      activityEvent(1, "a1", { kind: "reading_notes", state: "active", stats: { notesRead: 1 } }, 1),
+      activityEvent(2, "a1", { kind: "reading_notes", state: "done", stats: { notesRead: 4 } }, 1),
+      activityEvent(3, "a2", { kind: "choosing_layout", state: "failed" }, 1),
+      event(4, "analysis.leased", 2),
+      activityEvent(5, "a1", { kind: "reading_notes", state: "active", stats: { notesRead: 2 } }, 2),
+      activityEvent(6, "a1", { kind: "reading_notes", state: "done", stats: { notesRead: 5 } }, 2),
+      activityEvent(7, "a2", { kind: "choosing_layout", state: "done", stats: { chosen: "Agenda" } }, 2),
+    ];
+
+    const merged = mergeActivities(events);
+
+    assert.deepEqual(
+      merged.map((e) => e.seq),
+      // Four activity rows, two per attempt, each at its first position.
+      [2, 3, 4, 6, 7],
+    );
+    assert.deepEqual(
+      merged.map((e) => e.attempt),
+      [1, 1, 2, 2, 2],
+    );
+    assert.equal(merged[0].data.stats.notesRead, 4);
+    assert.equal(merged[3].data.stats.notesRead, 5);
+    assert.equal(merged[4].data.stats.chosen, "Agenda");
+  });
+
   it("passes everything else through and accepts any iterable", () => {
     const events = [event(1, "analysis.created"), event(2, "analysis.completed")];
     assert.deepEqual(mergeActivities(events), events);
     assert.deepEqual(mergeActivities(new Set(events)), events);
     assert.deepEqual(mergeActivities([]), []);
 
-    // The same activity id in a later attempt still upserts: one row per id.
+    // The same activity id within one attempt still upserts: one row per id.
     const repeated = mergeActivities([
       activityEvent(1, "a1", { state: "done" }),
       activityEvent(2, "a1", { state: "failed" }),
@@ -706,58 +745,37 @@ describe("mergeActivities", () => {
 });
 
 describe("describeEvent", () => {
-  it("describes every activity kind and state", () => {
+  it("describes every activity kind, in the active form and the finished one", () => {
     const cases = [
       [{ kind: "reading_brief", state: "active" }, "Reading the brief"],
       [{ kind: "reading_brief", state: "done" }, "Read the brief"],
-      [{ kind: "reading_brief", state: "failed" }, "Could not read the brief"],
-      [{ kind: "reading_notes", state: "done", stats: { notesRead: 3 } }, "Read 3 notes"],
-      [{ kind: "reading_notes", state: "done", stats: { notesRead: 1 } }, "Read 1 note"],
       [
-        { kind: "reading_notes", state: "active", stats: { notesRead: 2 } },
-        "Reading notes · 2 so far",
+        { kind: "reading_notes", state: "active", stats: { notesRead: 3 } },
+        "Reading your notes · 3 read",
       ],
-      [{ kind: "reading_notes", state: "active" }, "Reading notes"],
-      [{ kind: "reading_notes", state: "failed" }, "Could not read the notes"],
-      [{ kind: "checking_display", state: "active" }, "Checking the Display"],
-      [{ kind: "checking_display", state: "done" }, "Checked the Display"],
-      [{ kind: "checking_display", state: "failed" }, "Could not check the Display"],
+      [{ kind: "reading_notes", state: "done", stats: { notesRead: 3 } }, "Read 3 notes"],
+      [{ kind: "checking_display", state: "active" }, "Checking the display"],
+      [{ kind: "checking_display", state: "done" }, "Checked the display"],
       [
         { kind: "choosing_layout", state: "active", stats: { layoutsSeen: 2 } },
         "Looking at layouts · 2 so far",
       ],
       [
-        { kind: "choosing_layout", state: "done", stats: { layoutsSeen: 4 } },
-        "Looked at 4 layouts",
-      ],
-      [
-        { kind: "choosing_layout", state: "done", stats: { chosen: "Daily Summary" } },
-        "Chose Daily Summary",
-      ],
-      // A chosen layout outranks the running count while still active.
-      [
         {
           kind: "choosing_layout",
-          state: "active",
-          stats: { layoutsSeen: 3, chosen: "Daily Summary" },
+          state: "done",
+          stats: { layoutsSeen: 2, chosen: "Daily Summary" },
         },
-        "Chose Daily Summary",
+        "Looked at 2 layouts · chose Daily Summary",
       ],
-      // An explicit null means "looked, has not settled".
-      [
-        { kind: "choosing_layout", state: "active", stats: { chosen: null } },
-        "Looking at layouts",
-      ],
-      [{ kind: "choosing_layout", state: "failed" }, "Could not settle on a layout"],
-      [{ kind: "submitting_plan", state: "active" }, "Submitting the plan"],
+      // The plan is still being validated while the activity runs, and may yet
+      // come back; "Submitted" is only true once it has gone through.
+      [{ kind: "submitting_plan", state: "active" }, "Checking the plan"],
       [{ kind: "submitting_plan", state: "done" }, "Submitted the plan"],
-      [{ kind: "submitting_plan", state: "failed" }, "Could not submit the plan"],
       [{ kind: "retrying", state: "active" }, "Trying another layout"],
       [{ kind: "retrying", state: "done" }, "Tried another layout"],
-      [{ kind: "retrying", state: "failed" }, "Could not find another layout"],
-      [{ kind: "other", state: "active" }, "Working"],
-      [{ kind: "other", state: "done" }, "Finished a step"],
-      [{ kind: "other", state: "failed" }, "A step failed"],
+      [{ kind: "other", state: "active", steps: 4 }, "Working · 4 steps"],
+      [{ kind: "other", state: "done", steps: 4 }, "Worked through 4 steps"],
     ];
 
     for (const [data, expected] of cases) {
@@ -766,6 +784,109 @@ describe("describeEvent", () => {
         expected,
         `${data.kind}/${data.state}`,
       );
+    }
+  });
+
+  it("says nothing about a counter the activity does not carry, rather than zero", () => {
+    // Absent and zero are two different statements: "this kind does not count
+    // notes" is not "it read none".
+    const cases = [
+      [{ kind: "reading_notes", state: "active" }, "Reading your notes"],
+      [{ kind: "reading_notes", state: "active", stats: { notesRead: 0 } }, "Reading your notes"],
+      [{ kind: "reading_notes", state: "done" }, "Read your notes"],
+      [{ kind: "choosing_layout", state: "active" }, "Looking at layouts"],
+      [{ kind: "choosing_layout", state: "done", stats: { layoutsSeen: 4 } }, "Looked at 4 layouts"],
+      // No count, but it settled: the choice is the whole point of the activity.
+      [
+        { kind: "choosing_layout", state: "done", stats: { chosen: "Daily Summary" } },
+        "Chose Daily Summary",
+      ],
+      // An explicit null is "looked, has not settled yet", which is not a choice.
+      [
+        { kind: "choosing_layout", state: "active", stats: { layoutsSeen: 5, chosen: null } },
+        "Looking at layouts · 5 so far",
+      ],
+      // A layout already settled on outranks the running count.
+      [
+        { kind: "choosing_layout", state: "active", stats: { layoutsSeen: 5, chosen: "Agenda" } },
+        "Chose Agenda",
+      ],
+      [{ kind: "other", state: "active", steps: 0 }, "Working"],
+      [{ kind: "other", state: "done", steps: 0 }, "Worked through it"],
+    ];
+
+    for (const [data, expected] of cases) {
+      assert.equal(
+        describeEvent(activityEvent(1, "a1", data)),
+        expected,
+        `${data.kind}/${data.state}`,
+      );
+    }
+  });
+
+  it("counts one of a thing in the singular", () => {
+    assert.equal(
+      describeEvent(activityEvent(1, "a1", {
+        kind: "reading_notes",
+        state: "done",
+        stats: { notesRead: 1 },
+      })),
+      "Read 1 note",
+    );
+    assert.equal(
+      describeEvent(activityEvent(1, "a1", { kind: "other", state: "active", steps: 1 })),
+      "Working · 1 step",
+    );
+  });
+
+  it("describes a failed activity by what it was attempting", () => {
+    // "Read 3 notes — failed" contradicts itself; the active form does not.
+    const cases = [
+      [{ kind: "reading_brief", state: "failed" }, "Reading the brief — failed"],
+      [
+        { kind: "reading_notes", state: "failed", stats: { notesRead: 3 } },
+        "Reading your notes · 3 read — failed",
+      ],
+      [{ kind: "checking_display", state: "failed" }, "Checking the display — failed"],
+      [{ kind: "choosing_layout", state: "failed" }, "Looking at layouts — failed"],
+      [{ kind: "submitting_plan", state: "failed" }, "Checking the plan — failed"],
+      [{ kind: "retrying", state: "failed" }, "Trying another layout — failed"],
+      [{ kind: "other", state: "failed", steps: 2 }, "Working · 2 steps — failed"],
+    ];
+
+    for (const [data, expected] of cases) {
+      assert.equal(
+        describeEvent(activityEvent(1, "a1", data)),
+        expected,
+        `${data.kind}/${data.state}`,
+      );
+    }
+  });
+
+  it("separates a step that failed from one the guard refused", () => {
+    const cases = [
+      [
+        { kind: "other", state: "done", steps: 6, stats: { failedSteps: 1 } },
+        "Worked through 6 steps · 1 step failed",
+      ],
+      [
+        { kind: "other", state: "done", steps: 6, stats: { deniedSteps: 2 } },
+        "Worked through 6 steps · 2 steps blocked",
+      ],
+      // Both counters sit before the failure marker, so it stays one sentence.
+      [
+        { kind: "other", state: "failed", steps: 6, stats: { failedSteps: 1, deniedSteps: 1 } },
+        "Working · 6 steps · 1 step failed · 1 step blocked — failed",
+      ],
+      // A zero counter is not printed, the same as an absent one.
+      [
+        { kind: "other", state: "done", steps: 6, stats: { failedSteps: 0, deniedSteps: 0 } },
+        "Worked through 6 steps",
+      ],
+    ];
+
+    for (const [data, expected] of cases) {
+      assert.equal(describeEvent(activityEvent(1, "a1", data)), expected);
     }
   });
 
@@ -794,16 +915,6 @@ describe("describeEvent", () => {
       ],
       ["plan.submitted", { round: 2 }, "Submitted the plan (round 2)"],
       [
-        "plan.rejected",
-        { problems: 2, reason: "layout_mismatch", attempt: 1 },
-        "Plan sent back · 2 problems with the layout it chose",
-      ],
-      [
-        "plan.rejected",
-        { problems: 1, reason: "other", attempt: 2 },
-        "Plan sent back · 1 problem",
-      ],
-      [
         "plan.accepted",
         { presentationIds: ["p1", "p2"], actions: 2 },
         "Plan accepted · 2 Presentations",
@@ -819,6 +930,9 @@ describe("describeEvent", () => {
         "Finished · nothing worth showing",
       ],
       ["analysis.failed", { code: "no_presentable_content" }, "Failed · no_presentable_content"],
+      // A lost lease is not the end: the attempt is abandoned and handed out
+      // again, so the line says what happens next rather than that it stopped.
+      ["analysis.lease_expired", { attempt: 2, maxAttempts: 3 }, "Attempt 2 timed out — retrying"],
       ["render.finished", { presentationId: "p1" }, "Rendered p1"],
       ["render.failed", { presentationId: "p1" }, "Could not render p1"],
       [
@@ -842,6 +956,45 @@ describe("describeEvent", () => {
     for (const [type, data, expected] of cases) {
       assert.equal(describeEvent({ ...event(1, type), data }), expected, type);
     }
+  });
+
+  it("says which kind of mistake a rejected plan made, and that it is being redone", () => {
+    // A rejected plan is not a failed run: the worker corrects it and submits
+    // again, so every one of these ends in "trying again".
+    const cases = [
+      ["target", "The plan aimed at the wrong display — trying again (2 problems)"],
+      ["layout_mismatch", "The first layout didn't fit — trying another (2 problems)"],
+      ["content_refs", "The plan missed some of your notes — trying again (2 problems)"],
+      ["schema", "The layout details didn't validate — trying again (2 problems)"],
+      ["other", "The plan was sent back — trying again (2 problems)"],
+    ];
+
+    for (const [reason, expected] of cases) {
+      assert.equal(
+        describeEvent({
+          ...event(1, "plan.rejected"),
+          data: { problems: 2, reason, attempt: 1 },
+        }),
+        expected,
+        reason,
+      );
+    }
+
+    // One problem in the singular, and no count at all when there is none.
+    assert.equal(
+      describeEvent({
+        ...event(1, "plan.rejected"),
+        data: { problems: 1, reason: "schema", attempt: 1 },
+      }),
+      "The layout details didn't validate — trying again (1 problem)",
+    );
+    assert.equal(
+      describeEvent({
+        ...event(1, "plan.rejected"),
+        data: { problems: 0, reason: "schema", attempt: 1 },
+      }),
+      "The layout details didn't validate — trying again",
+    );
   });
 
   it("falls back to the backend summary and stays pure", () => {
@@ -916,11 +1069,11 @@ function eventFixture(seq, overrides = {}) {
 }
 
 /** A parsed event, as the SDK would hand it to `describeEvent`. */
-function event(seq, type) {
+function event(seq, type, attempt = 1) {
   return {
     seq,
     at: "2026-08-12T10:00:02Z",
-    attempt: 1,
+    attempt,
     source: "backend",
     type,
     level: "info",
@@ -929,9 +1082,9 @@ function event(seq, type) {
   };
 }
 
-function activityEvent(seq, activityId, data = {}) {
+function activityEvent(seq, activityId, data = {}, attempt = 1) {
   return {
-    ...event(seq, "agent.activity"),
+    ...event(seq, "agent.activity", attempt),
     source: "agent",
     data: {
       activityId,
