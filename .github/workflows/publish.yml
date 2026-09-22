@@ -18,6 +18,9 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
+        with:
+          # The whole history, so the tag can be checked against main below.
+          fetch-depth: 0
 
       - name: Set up Node.js
         uses: actions/setup-node@v6
@@ -26,8 +29,10 @@ jobs:
           registry-url: "https://registry.npmjs.org"
           package-manager-cache: false
 
+      # Pinned: this job holds id-token: write, so the CLI that uses it should
+      # change only through a reviewed commit.
       - name: Use an OIDC-compatible npm CLI
-        run: npm install --global npm@11
+        run: npm install --global npm@11.20.0
 
       - name: Verify tag matches package version
         id: release
@@ -44,6 +49,12 @@ jobs:
             dist_tag="${prerelease%%.*}"
           else
             dist_tag="latest"
+            # What `npm install` gets by default has to be what main says it
+            # is. Pre-releases may come from a branch; a stable one may not.
+            if ! git merge-base --is-ancestor "${GITHUB_SHA}" origin/main; then
+              echo "Stable tag ${GITHUB_REF_NAME} points at ${GITHUB_SHA}, which is not on main."
+              exit 1
+            fi
           fi
 
           echo "Publishing ${package_version} with npm dist-tag ${dist_tag}."
