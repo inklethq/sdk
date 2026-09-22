@@ -17,7 +17,7 @@ plan. Subscription checkout and management stay in the
 
 ## Requirements
 
-- Node.js 20 or newer
+- Node.js 22 or newer
 - An Inklet personal access token (PAT)
 - A trusted server environment
 
@@ -52,8 +52,58 @@ const inklet = new Inklet({ pat: process.env.INKLET_PAT });
 both options. Client construction validates configuration without making a
 network request.
 
-The default service address is `https://dev.iminklet.com`. A controlled local
-or test service can be selected with `baseUrl`.
+The default service address is `https://dev.iminklet.com`, the hosted Inklet
+API. A controlled local or test service can be selected with `baseUrl`.
+
+### Timeouts and cancellation
+
+Every HTTP request has a timeout: 60 seconds by default, and 5 minutes for
+each storage upload, which moves the file itself. Both are set on the client,
+and every method takes `{ signal, timeoutMs }` as its last argument to change
+them for one call:
+
+```ts
+const inklet = new Inklet({
+  pat: process.env.INKLET_PAT!,
+  timeoutMs: 30_000,        // each API request
+  uploadTimeoutMs: 600_000, // each storage upload
+});
+
+const controller = new AbortController();
+const page = await inklet.displays.list({ limit: 20, signal: controller.signal });
+const display = await inklet.displays.retrieve(page.items[0].id, { timeoutMs: 5_000 });
+```
+
+A request that runs out of time throws `RequestTimeoutError`, a
+`NetworkError`. An aborted call throws `OperationAbortedError` with the
+signal's reason as its `cause`, and the abort reaches a request already in
+flight, including inside the waiting helpers. Neither undoes anything the
+backend had already accepted.
+
+A per-call `timeoutMs` applies to each request the call sends, not to the call
+as a whole; pass `AbortSignal.timeout(ms)` as the `signal` for an overall
+limit. On `watch()` and `requestRaw()` it covers getting the response headers,
+so a stream that runs for minutes is not cut off.
+
+The waiting helpers and `timeline()` only ever read, so they ride out up to
+three transient failures in a row — a dropped connection, a timeout, or HTTP
+408, 429, 500, 502, 503, or 504 — backing off and honouring `Retry-After`;
+`watch()` reconnects on the same failures (see [Transport](#transport)). Calls
+that create or change something are never retried for you; see
+[Idempotency](#idempotency) for retrying them safely.
+
+## Versioning
+
+The SDK is pre-1.0. A minor release (`0.3` → `0.4`) can break the API and
+lists each break under **Breaking** in the [changelog](CHANGELOG.md); a patch
+release does not. npm's default `^0.3.0` range already stays on `0.3.x`.
+
+Fields the backend reports as a fixed set of words — `state`, `mode`,
+`format`, an activity's `kind` — are typed as the values this SDK knows plus
+any other string. A backend that adds a value therefore never breaks an
+installed SDK: the new value reads through as it is, a waiting helper treats
+an unknown state as not finished yet, and `describeEvent()` falls back to a
+generic line. Compare against the values you handle and keep a default branch.
 
 ## Displays and Presentations
 
@@ -231,6 +281,28 @@ cover both the Content and the Analysis — which is exactly what `push.*` and
 request the backend *rejects* releases its key, so a call that failed on a
 fixable problem can be retried under the same one.
 
+A call that fails for another reason — a timeout, a dropped connection, a `5xx`
+— may still have created something, so retry it with the key it used rather
+than a fresh one. Every error such a call throws carries that key, including
+one the SDK generated:
+
+```ts
+import { NetworkError } from "@inklethq/sdk";
+
+try {
+  await inklet.push.auto({ assets });
+} catch (error) {
+  if (error instanceof NetworkError && error.idempotencyKey) {
+    // Same input, same key: replays what the first attempt created.
+    await inklet.push.auto({ assets, idempotencyKey: error.idempotencyKey });
+  } else {
+    throw error;
+  }
+}
+```
+
+The backend keeps keys for 24 hours, and the retry has to send the same input.
+
 ## Follow an Analysis
 
 An Analysis publishes an ordered event stream: what the agent was given, what
@@ -338,8 +410,10 @@ to the backend's `summary`. It is pure and has no locale option.
 `watch()` handles the transport for you:
 
 - It reads server-sent events, and reconnects from the last `seq` with
-  `Last-Event-ID` if the connection drops (five attempts, exponential
-  back-off), so nothing is lost across a reconnect.
+  `Last-Event-ID` if the connection drops or the server answers with a
+  transient status — 408, 429, 500, 502, 503, or 504 (five attempts in a row,
+  exponential back-off that honours `Retry-After`) — so nothing is lost across
+  a reconnect.
 - If the response is not `text/event-stream` — which is what an intermediate
   proxy that cannot carry streaming responses returns — it falls back to
   polling `listEvents()` every `pollIntervalMs` (1,000 ms by default) until the
@@ -469,8 +543,10 @@ console.log(presentation.renditions[0]?.url);
 
 An `output` target always produces exactly one Presentation, so
 `waitUntilReady()` returns it; it throws `NoChangeError` only when handed an
-Analysis that named no `contentIds`. A stored Scene can be rendered at another
-size without rerunning AI:
+Analysis that named no `contentIds`, and `MultiplePresentationsError` (with
+`presentationIds`) when handed one that produced several — one pinned to
+several Displays, say — so use `analyses.wait()` for those. A stored Scene can be rendered at another size
+without rerunning AI:
 
 ```ts
 const rendition = await inklet.presentations.render(presentation.id, {
@@ -602,20 +678,26 @@ log and is not a contract — never branch on it.
 
 `quota_exceeded` and `rate_limited` share a class and mean different things:
 back-off clears one, and only time or an upgrade clears the other, which is
-what `details.resetAt` is for.
+what `details.resetAt` is for. When the response carried `Retry-After`,
+`RateLimitError` and `ApiError` expose it as `retryAfterMs`, otherwise `null`.
 
 Anything else keeps the backend's `code` on an `ApiError`, so a code this table
 does not list is still readable rather than swallowed. `SubscriptionRequiredError`
 is still exported and still matches `code: "subscription_required"`, but current
 backends refuse a plan-gated call with `plan_upgrade_required` or
 `payment_required` instead. Errors raised before a request goes out are
-`ConfigurationError`; `AnalysisFailedError`, `NoChangeError`,
-`OperationTimeoutError`, and `OperationAbortedError` come from the waiting
-helpers rather than from a response.
+`ConfigurationError`. `NetworkError` means no response arrived, and its
+subclass `RequestTimeoutError` (`code: "request_timed_out"`, with `timeoutMs`)
+means one request ran out of time. `AnalysisFailedError`, `NoChangeError`,
+`MultiplePresentationsError`, and `OperationTimeoutError` come from the waiting
+helpers rather than from a response, and `OperationAbortedError` from any call
+whose `signal` was aborted. An error from a call that sent an
+`Idempotency-Key` carries it as `idempotencyKey`.
 
-Authenticated requests refuse absolute URLs and cross-origin redirects.
+Authenticated requests refuse absolute URLs and follow no redirects.
 Credentials are redacted from errors, and storage uploads never include the
-PAT.
+PAT. A response that is not JSON — a proxy's error page, say — is reported by
+its status and a short excerpt, never verbatim.
 
 ## Development
 
@@ -634,7 +716,7 @@ Every pull request and every push to `main` runs four checks on GitHub Actions.
 
 | Check | What it does | Run it locally |
 | --- | --- | --- |
-| `Node.js 20` / `22` / `24` | `npm ci`, then `npm run check` and `npm run pack:check` on each supported release | `npm ci && npm run check && npm run pack:check` |
+| `Node.js 22` / `24` / `26` | `npm ci`, then `npm run check` and `npm run pack:check` on each supported release | `npm ci && npm run check && npm run pack:check` |
 | `Dependency audit` | Reports advisories rated high or critical. Advisory only: it never fails the build | `npm audit --audit-level=high` |
 | `Analyze JavaScript and TypeScript` | CodeQL security queries, also on a weekly schedule | — |
 | `gitleaks` | Scans the full commit history for leaked credentials | `docker run --rm -v "$PWD:/repo:ro" ghcr.io/gitleaks/gitleaks:v8.30.1 git /repo --config /repo/.gitleaks.toml --redact` |
@@ -644,3 +726,7 @@ The Node.js matrix covers the whole range the package claims in `engines`.
 `.gitleaks.toml` silences the fake PATs and idempotency keys used as fixtures,
 each scoped to the single rule it trips. Never add a real credential to that
 allowlist: revoke it and rewrite the history instead.
+
+## License
+
+[MIT](LICENSE)
