@@ -13,11 +13,12 @@ if (dirname(distDirectory) !== projectRoot) {
 rmSync(distDirectory, { recursive: true, force: true });
 
 const compiler = resolve(projectRoot, "node_modules/typescript/bin/tsc");
-for (const config of [
-  "tsconfig.build.esm.json",
-  "tsconfig.build.cjs.json",
-  "tsconfig.build.types.json",
-]) {
+// Each build emits its own declarations next to its JavaScript. The files are
+// the same text, but TypeScript reads a `.d.ts` as ESM or CommonJS from the
+// nearest package.json, exactly as Node.js does for `.js`: `require` users
+// need declarations that sit under dist/cjs and its `"type": "commonjs"`
+// marker, or a `.cts` importer is told the package is ESM-only (TS1479).
+for (const config of ["tsconfig.build.esm.json", "tsconfig.build.cjs.json"]) {
   const result = spawnSync(process.execPath, [compiler, "--project", config], {
     cwd: projectRoot,
     stdio: "inherit",
@@ -28,6 +29,8 @@ for (const config of [
   }
 }
 
+// The package itself is `"type": "module"`, so dist/cjs needs its own marker
+// for both Node.js and TypeScript to read its files as CommonJS.
 const commonJsDirectory = resolve(distDirectory, "cjs");
 mkdirSync(commonJsDirectory, { recursive: true });
 writeFileSync(

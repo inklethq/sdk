@@ -1,25 +1,46 @@
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { it } from "node:test";
+import { describeFor, loadSdk } from "./sdk.mjs";
 import {
+  ANALYSIS_ID,
+  CONTENT_ID,
+  DISPLAY_ID,
+  OTHER_CONTENT_ID,
+  OTHER_PRESENTATION_ID,
+  PAT,
+  PRESENTATION_ID,
+  analysisFixture,
+  contentFixture,
+  displayFixture,
+  generatedPresentationFixture,
+  json,
+  omit,
+  outputFixture,
+  presentationFixture,
+  queueItemFixture,
+  renditionFixture,
+  uploadTicket,
+} from "./fixtures.mjs";
+
+const describe = describeFor(import.meta.url);
+const {
   AnalysisFailedError,
+  ApiError,
+  AssetUploadError,
   AuthenticationFailedError,
   ConfigurationError,
   ConflictError,
   Inklet,
   InvalidResponseError,
   MAX_ASSETS_PER_CONTENT,
+  MultiplePresentationsError,
+  NetworkError,
   NoChangeError,
   OperationAbortedError,
   OperationTimeoutError,
-} from "../dist/esm/index.js";
+  RequestTimeoutError,
+} = await loadSdk(import.meta.url);
 
-const PAT = "il_pat_test_abcdefghijklmnopqrstuvwxyz";
-const DISPLAY_ID = "01912345-6789-7abc-def0-123456789abc";
-const CONTENT_ID = "01922345-6789-7abc-def0-123456789abc";
-const OTHER_CONTENT_ID = "01922345-6789-7abc-def0-123456789abd";
-const PRESENTATION_ID = "01932345-6789-7abc-def0-123456789abc";
-const OTHER_PRESENTATION_ID = "01932345-6789-7abc-def0-123456789abd";
-const ANALYSIS_ID = "01952345-6789-7abc-def0-123456789abc";
 
 describe("SDK v1 resource reads", () => {
   it("reads Displays, queue, current Presentation, and Presentation details", async () => {
@@ -270,12 +291,14 @@ describe("SDK v1 resource reads", () => {
     const cases = [
       // contentIds as bare UUIDs instead of { id, role } refs.
       { ...presentationFixture(), contentIds: [CONTENT_ID] },
-      // A contentIds entry with an unknown role.
+      // A contentIds entry whose role is not a string at all.
       {
         ...presentationFixture(),
-        contentIds: [{ id: CONTENT_ID, role: "primary" }],
+        contentIds: [{ id: CONTENT_ID, role: 1 }],
       },
       // The retired auto/manual/hardcode mode values, and the empty string.
+      // These are past values with another meaning, not future ones, so they
+      // stay refused while an unknown mode passes through.
       { ...presentationFixture(), mode: "auto" },
       { ...presentationFixture(), mode: "manual" },
       { ...presentationFixture(), mode: "hardcode" },
@@ -1142,13 +1165,29 @@ describe("SDK v1 targetless Presentation workflow", () => {
     assert.equal(rendition.expiresAt, null);
   });
 
-  it("rejects a rendition with an unknown state", async () => {
+  it("passes a rendition state it does not know through, url and all", async () => {
     const client = new Inklet({
       pat: PAT,
-      fetch: async () => json(renditionFixture({ state: "rendering" })),
+      fetch: async () =>
+        json({
+          ...renditionFixture({ state: "rendering" }),
+          colorMode: "sepia",
+        }),
+    });
+    const rendition = await client.presentations.render(PRESENTATION_ID, {
+      viewport: { width: 360, height: 170 },
+    });
+    // Nothing is inferred from the unknown state: `url` still decides.
+    assert.equal(rendition.state, "rendering");
+    assert.equal(rendition.colorMode, "sepia");
+    assert.equal(rendition.url, null);
+
+    const malformed = new Inklet({
+      pat: PAT,
+      fetch: async () => json({ ...renditionFixture(), state: 3 }),
     });
     await assert.rejects(
-      client.presentations.render(PRESENTATION_ID, {
+      malformed.presentations.render(PRESENTATION_ID, {
         viewport: { width: 360, height: 170 },
       }),
       InvalidResponseError,
@@ -1206,233 +1245,378 @@ describe("SDK v1 errors", () => {
   });
 });
 
-function json(body, status = 200, headers = {}) {
-  return Response.json(body, { status, headers });
-}
+describe("SDK v1 values the backend adds later", () => {
+  it("passes unknown Content, Asset, and upload states through", async () => {
+    const content = contentFixture({ binary: true });
+    content.state = "archived";
+    content.assets[0].type = "audio";
+    content.assets[0].uploadState = "scanning";
+    const client = new Inklet({ pat: PAT, fetch: async () => json(content) });
 
-function omit(record, key) {
-  const { [key]: _removed, ...rest } = record;
-  return rest;
-}
+    const read = await client.contents.retrieve(CONTENT_ID);
+    assert.equal(read.state, "archived");
+    assert.equal(read.assets[0].type, "audio");
+    assert.equal(read.assets[0].uploadState, "scanning");
+  });
 
-function displayFixture(overrides = {}) {
-  return {
-    id: DISPLAY_ID,
-    hardwareId: "hardware-1",
-    thingName: "inklet-studio",
-    name: "Studio",
-    nickname: "Studio",
-    firmware: "1.2.0",
-    batteryPercent: 85,
-    online: true,
-    lastSeenAt: "2026-08-12T10:00:00Z",
-    stateUpdatedAt: "2026-08-12T10:00:00Z",
-    boundAt: "2026-08-01T10:00:00Z",
-    tags: [],
-    syncIntervalMinutes: null,
-    nextSyncAt: null,
-    currentPresentationId: PRESENTATION_ID,
-    currentPresentationUpdatedAt: "2026-08-12T10:02:00Z",
-    pendingPresentationId: null,
-    capabilities: {
-      pixelWidth: 800,
-      pixelHeight: 480,
-      orientation: "landscape",
-      colorMode: "mono",
-      supportedImageContentTypes: ["image/png", "image/jpeg"],
-      supportedOutputFormats: ["png", "raw2", "raw4"],
-    },
-    ...overrides,
-  };
-}
+  it("passes unknown Analysis mode, trigger, state, context, and outcome through", async () => {
+    const client = new Inklet({
+      pat: PAT,
+      fetch: async () =>
+        json({
+          ...analysisFixture(),
+          mode: "batch",
+          trigger: "webhook",
+          state: "paused",
+          context: "workspace",
+          outcome: "deferred",
+        }),
+    });
+    const analysis = await client.analyses.retrieve(ANALYSIS_ID);
+    assert.deepEqual(
+      [analysis.mode, analysis.trigger, analysis.state, analysis.context, analysis.outcome],
+      ["batch", "webhook", "paused", "workspace", "deferred"],
+    );
+  });
 
-function queueItemFixture(overrides = {}) {
-  return {
-    id: PRESENTATION_ID,
-    displayId: DISPLAY_ID,
-    contentIds: [
-      { id: CONTENT_ID, role: "input" },
-      { id: OTHER_CONTENT_ID, role: "context" },
-    ],
-    mode: "ai",
-    state: "queued",
-    createdAt: "2026-08-12T10:00:00Z",
-    updatedAt: "2026-08-12T10:01:00Z",
-    ...overrides,
-  };
-}
-
-function presentationFixture() {
-  return {
-    id: PRESENTATION_ID,
-    displayId: DISPLAY_ID,
-    analysisId: ANALYSIS_ID,
-    contentIds: [
-      { id: CONTENT_ID, role: "input" },
-      { id: OTHER_CONTENT_ID, role: "context" },
-    ],
-    mode: "ai",
-    state: "confirmed",
-    title: "周五下午 3 点和王老师开会",
-    image: {
-      url: "https://cdn.example/image.png?signature=redacted",
-      format: "png",
+  it("passes unknown Presentation, rendition, output, and scene values through", async () => {
+    const presentation = generatedPresentationFixture({
+      renditions: [
+        {
+          ...renditionFixture(),
+          mediaType: "image/webp",
+          format: "webp",
+          colorMode: "sepia",
+          state: "optimizing",
+        },
+      ],
+    });
+    presentation.state = "archived";
+    presentation.mode = "remix";
+    presentation.contentIds = [{ id: CONTENT_ID, role: "reference" }];
+    presentation.output = { ...outputFixture(), formats: ["scene", "svg"], colorMode: "sepia" };
+    presentation.scene.data.elements.push({
+      id: "qr",
+      type: "qrcode",
+      frame: { x: 0, y: 0, width: 40, height: 40 },
+      properties: { value: "https://example.com" },
+    });
+    presentation.image = {
+      url: "https://cdn.example/image.bin?signature=redacted",
+      format: "raw8",
       width: 800,
       height: 480,
       expiresAt: "2026-08-12T10:15:00Z",
       updatedAt: "2026-08-12T10:02:00Z",
-    },
-    failure: null,
-    createdAt: "2026-08-12T10:00:00Z",
-    updatedAt: "2026-08-12T10:02:00Z",
-  };
-}
+    };
+    const client = new Inklet({ pat: PAT, fetch: async () => json(presentation) });
 
-function outputFixture() {
-  return {
-    formats: ["scene", "png"],
-    preset: null,
-    viewport: { width: 360, height: 170 },
-    colorMode: "color",
-  };
-}
+    const read = await client.presentations.retrieve(PRESENTATION_ID);
+    assert.equal(read.state, "archived");
+    assert.equal(read.mode, "remix");
+    assert.equal(read.contentIds[0].role, "reference");
+    assert.deepEqual(read.output.formats, ["scene", "svg"]);
+    assert.equal(read.output.colorMode, "sepia");
+    assert.equal(read.scene.data.elements[1].type, "qrcode");
+    assert.equal(read.image.format, "raw8");
+    assert.deepEqual(
+      [read.renditions[0].mediaType, read.renditions[0].format, read.renditions[0].colorMode, read.renditions[0].state],
+      ["image/webp", "webp", "sepia", "optimizing"],
+    );
+  });
 
-// The backend always sends every rendition key, `null` where a state has no
-// value for it, so the fixture does too: the shape of a `preparing` rendition
-// is the thing these tests are about.
-function renditionFixture({ state = "ready", failure = null } = {}) {
-  const ready = state === "ready";
-  return {
-    id: "01942345-6789-7abc-def0-123456789abc",
-    mediaType: "image/png",
-    format: "png",
-    width: 360,
-    height: 170,
-    colorMode: "color",
-    state,
-    url: ready ? "https://cdn.example/generated.png?signature=redacted" : null,
-    expiresAt: ready ? "2026-08-12T10:15:00Z" : null,
-    updatedAt: "2026-08-12T10:02:00Z",
-    failure,
-  };
-}
-
-function generatedPresentationFixture({
-  renditions = [renditionFixture()],
-} = {}) {
-  return {
-    id: PRESENTATION_ID,
-    displayId: null,
-    analysisId: ANALYSIS_ID,
-    contentIds: [{ id: CONTENT_ID, role: "input" }],
-    mode: "ai",
-    state: "ready",
-    output: outputFixture(),
-    scene: {
-      mediaType: "application/vnd.inklet.scene+json;version=1",
-      version: 1,
-      data: {
-        version: 1,
-        viewport: { width: 360, height: 170 },
-        background: "#ffffff",
-        elements: [{
-          id: "headline",
-          type: "text",
-          frame: { x: 20, y: 20, width: 320, height: 80 },
-          properties: {
-            text: "A calm weekly summary",
-            fontSize: 28,
-            color: "#000000",
-          },
-        }],
+  it("passes unknown Display formats and queue values through", async () => {
+    const client = new Inklet({
+      pat: PAT,
+      fetch: async (input) => {
+        const url = new URL(input);
+        if (url.pathname.endsWith("/queue")) {
+          return json({
+            items: [queueItemFixture({ state: "scheduled", mode: "remix" })],
+            nextCursor: null,
+            hasMore: false,
+          });
+        }
+        return json(
+          displayFixture({
+            capabilities: {
+              ...displayFixture().capabilities,
+              supportedOutputFormats: ["png", "raw8"],
+            },
+          }),
+        );
       },
-    },
-    renditions,
-    image: null,
-    failure: null,
-    createdAt: "2026-08-12T10:00:00Z",
-    updatedAt: "2026-08-12T10:02:00Z",
-  };
-}
+    });
+    const display = await client.displays.retrieve(DISPLAY_ID);
+    assert.deepEqual(display.capabilities.supportedOutputFormats, ["png", "raw8"]);
+    const item = (await client.displays.listQueue(DISPLAY_ID)).items[0];
+    assert.equal(item.state, "scheduled");
+    assert.equal(item.mode, "remix");
+  });
 
-function contentFixture({
-  state,
-  binary = false,
-  uploaded = false,
-  analysisIds = [],
-  presentationIds = [],
-} = {}) {
-  return {
-    id: CONTENT_ID,
-    title: null,
-    state: state ?? (binary && !uploaded ? "pending" : "ready"),
-    assets: binary
-      ? [{
-          assetIndex: 0,
-          type: "image",
-          text: null,
-          url: null,
+  it("still refuses a value that is not a string at all", async () => {
+    const cases = [
+      [() => ({ ...contentFixture(), state: 1 }), (c) => c.contents.retrieve(CONTENT_ID)],
+      [() => ({ ...analysisFixture(), state: null }), (c) => c.analyses.retrieve(ANALYSIS_ID)],
+      [() => ({ ...analysisFixture(), outcome: 2 }), (c) => c.analyses.retrieve(ANALYSIS_ID)],
+      [() => ({ ...presentationFixture(), state: "" }), (c) => c.presentations.retrieve(PRESENTATION_ID)],
+      [
+        () => displayFixture({
+          capabilities: { ...displayFixture().capabilities, supportedOutputFormats: ["png", 4] },
+        }),
+        (c) => c.displays.retrieve(DISPLAY_ID),
+      ],
+    ];
+    for (const [body, call] of cases) {
+      const client = new Inklet({ pat: PAT, fetch: async () => json(body()) });
+      await assert.rejects(call(client), InvalidResponseError);
+    }
+  });
+});
+
+describe("SDK v1 Content listing and upload tickets", () => {
+  it("lists Contents with state, cursor, and limit", async () => {
+    let url;
+    const client = new Inklet({
+      pat: PAT,
+      fetch: async (input) => {
+        url = new URL(input);
+        return json({
+          items: [contentFixture({ binary: true })],
+          nextCursor: "cursor-2",
+          hasMore: true,
+        });
+      },
+    });
+
+    const page = await client.contents.list({ state: "pending", cursor: "cursor-1", limit: 5 });
+    assert.equal(url.pathname, "/api/sdk/v1/contents");
+    assert.equal(url.searchParams.get("state"), "pending");
+    assert.equal(url.searchParams.get("cursor"), "cursor-1");
+    assert.equal(url.searchParams.get("limit"), "5");
+    assert.equal(page.items[0].id, CONTENT_ID);
+    assert.equal(page.items[0].state, "pending");
+    assert.equal(page.nextCursor, "cursor-2");
+    assert.equal(page.hasMore, true);
+
+    await client.contents.list();
+    assert.equal(url.search, "");
+  });
+
+  it("validates list filters before requesting", async () => {
+    let requested = false;
+    const client = new Inklet({
+      pat: PAT,
+      fetch: async () => {
+        requested = true;
+        return json({});
+      },
+    });
+    // The request side stays closed: sending a state the backend does not
+    // know can only fail.
+    await assert.rejects(client.contents.list({ state: "archived" }), ConfigurationError);
+    await assert.rejects(client.contents.list({ limit: 51 }), ConfigurationError);
+    await assert.rejects(client.contents.list({ cursor: "" }), ConfigurationError);
+    assert.equal(requested, false);
+  });
+
+  it("refreshes upload tickets for the named Assets", async () => {
+    let request;
+    const client = new Inklet({
+      pat: PAT,
+      fetch: async (input, init = {}) => {
+        request = { url: new URL(input), method: init.method, body: JSON.parse(init.body) };
+        return json({
+          content: contentFixture({ binary: true }),
+          uploadTickets: [uploadTicket()],
+        });
+      },
+    });
+
+    const refreshed = await client.contents.refreshUploadTickets(CONTENT_ID, [0]);
+    assert.equal(request.url.pathname, `/api/sdk/v1/contents/${CONTENT_ID}/upload-tickets`);
+    assert.equal(request.method, "POST");
+    assert.deepEqual(request.body, { assetIndexes: [0] });
+    assert.equal(refreshed.content.id, CONTENT_ID);
+    assert.deepEqual(refreshed.uploadTickets[0].fields, { key: "sdk/test/photo.png" });
+  });
+
+  it("validates Asset indexes before refreshing", async () => {
+    let requested = false;
+    const client = new Inklet({
+      pat: PAT,
+      fetch: async () => {
+        requested = true;
+        return json({});
+      },
+    });
+    for (const indexes of [[], [0, 0], [-1], [1.5], "0", undefined]) {
+      await assert.rejects(
+        client.contents.refreshUploadTickets(CONTENT_ID, indexes),
+        ConfigurationError,
+        JSON.stringify(indexes),
+      );
+    }
+    assert.equal(requested, false);
+  });
+
+  it("gives up after a failed upload fails again, keeping what went wrong", async () => {
+    let uploads = 0;
+    let refreshes = 0;
+    const keys = [];
+    const client = new Inklet({
+      pat: PAT,
+      fetch: async (input, init = {}) => {
+        const url = new URL(input);
+        if (url.origin === "https://uploads.example") {
+          uploads += 1;
+          return new Response(null, { status: 403 });
+        }
+        if (url.pathname.endsWith("/upload-tickets")) {
+          refreshes += 1;
+          return json({
+            content: contentFixture({ binary: true }),
+            uploadTickets: [uploadTicket()],
+          });
+        }
+        keys.push(new Headers(init.headers).get("idempotency-key"));
+        return json({ content: contentFixture({ binary: true }), uploadTickets: [uploadTicket()] }, 201);
+      },
+    });
+
+    await assert.rejects(
+      client.contents.upload({
+        assets: [client.assets.image({
+          data: new Uint8Array([1]),
           filename: "photo.png",
           contentType: "image/png",
-          sizeBytes: 3,
-          uploadState: uploaded ? "uploaded" : "pending",
-        }]
-      : [{
-          assetIndex: 0,
-          type: "text",
-          text: "Hello Inklet",
-          url: null,
-          filename: null,
-          contentType: null,
-          sizeBytes: null,
-          uploadState: "uploaded",
-        }],
-    failedAssetIndexes: [],
-    analysisIds,
-    presentationIds,
-    failure: null,
-    createdAt: "2026-08-12T10:00:00Z",
-    updatedAt: "2026-08-12T10:00:01Z",
-  };
-}
+        })],
+      }),
+      (error) => {
+        assert.ok(error instanceof AssetUploadError);
+        assert.equal(error.contentId, CONTENT_ID);
+        assert.deepEqual(error.failedAssetIndexes, [0]);
+        // The storage refusal is kept rather than discarded.
+        assert.ok(error.cause instanceof ApiError);
+        assert.equal(error.cause.status, 403);
+        assert.equal(error.cause.code, "asset_upload_failed");
+        // A generated key, so the upload can be retried without a second Content.
+        assert.equal(error.idempotencyKey, keys[0]);
+        assert.match(error.idempotencyKey, /^sdk-/);
+        assert.equal(error.toJSON().idempotencyKey, keys[0]);
+        return true;
+      },
+    );
+    assert.equal(uploads, 2);
+    assert.equal(refreshes, 1);
+  });
+});
 
-function analysisFixture({
-  mode = "ai",
-  trigger = "api",
-  state = "completed",
-  outcome = state === "completed" ? "presentations" : null,
-  noChangeReason = null,
-  context = "submitted",
-  scope = null,
-  target = null,
-  presentationIds = outcome === "presentations" ? [PRESENTATION_ID] : [],
-  failure = null,
-} = {}) {
-  return {
-    id: ANALYSIS_ID,
-    mode,
-    trigger,
-    state,
-    outcome,
-    noChangeReason,
-    contentIds: context === "history" && scope ? [] : [CONTENT_ID],
-    context,
-    scope,
-    intent: null,
-    title: null,
-    target,
-    presentationIds,
-    failure,
-    createdAt: "2026-08-12T10:00:02Z",
-    updatedAt: "2026-08-12T10:00:20Z",
-  };
-}
+describe("SDK v1 assets.link", () => {
+  it("normalizes an HTTP or HTTPS URL", () => {
+    const client = new Inklet({ pat: PAT, fetch: async () => json({}) });
+    assert.deepEqual(client.assets.link("  https://Example.com/a b  "), {
+      type: "link",
+      url: "https://example.com/a%20b",
+    });
+    assert.equal(client.assets.link("http://example.com").url, "http://example.com/");
+  });
 
-function uploadTicket() {
-  return {
-    assetIndex: 0,
-    url: "https://uploads.example",
-    fields: { key: "sdk/test/photo.png" },
-    expiresAt: "2026-08-12T10:15:00Z",
-  };
-}
+  it("refuses anything else", () => {
+    const client = new Inklet({ pat: PAT, fetch: async () => json({}) });
+    for (const url of [
+      "",
+      "   ",
+      "example.com",
+      "ftp://example.com/file",
+      "javascript:alert(1)",
+      "https://user:secret@example.com/",
+      42,
+    ]) {
+      assert.throws(() => client.assets.link(url), ConfigurationError, String(url));
+    }
+  });
+});
+
+describe("SDK v1 ids in paths and queries", () => {
+  it("sends a query-string id encoded once, not twice", async () => {
+    const searches = [];
+    const client = new Inklet({
+      pat: PAT,
+      fetch: async (input) => {
+        searches.push(new URL(input).search);
+        return json({ items: [], nextCursor: null, hasMore: false });
+      },
+    });
+
+    await client.analyses.list({ contentId: " content/with space " });
+    await client.presentations.list({ displayId: "display/with space" });
+
+    assert.equal(new URLSearchParams(searches[0]).get("contentId"), "content/with space");
+    assert.equal(searches[0], "?contentId=content%2Fwith+space");
+    assert.equal(new URLSearchParams(searches[1]).get("displayId"), "display/with space");
+    assert.doesNotMatch(searches.join(""), /%25/);
+  });
+
+  it("refuses . and .. as ids, which would change the request path", async () => {
+    let requested = false;
+    const client = new Inklet({
+      pat: PAT,
+      fetch: async () => {
+        requested = true;
+        return json({});
+      },
+    });
+    for (const call of [
+      () => client.contents.retrieve(".."),
+      () => client.contents.retrieve(" . "),
+      () => client.analyses.retrieve(".."),
+      () => client.displays.retrieve("."),
+      () => client.presentations.retrieve(".."),
+      () => client.presentations.render("..", { viewport: { width: 10, height: 10 } }),
+      () => client.displays.listQueue(".."),
+      () => client.analyses.listEvents(".."),
+      () => client.analyses.archive("."),
+    ]) {
+      await assert.rejects(call(), ConfigurationError);
+    }
+    assert.equal(requested, false);
+  });
+
+  it("still sends an id that merely contains dots, as one segment", async () => {
+    let path;
+    const client = new Inklet({
+      pat: PAT,
+      fetch: async (input) => {
+        path = new URL(input).pathname;
+        return json(contentFixture());
+      },
+    });
+    await client.contents.retrieve("../content.v2");
+    assert.equal(path, "/api/sdk/v1/contents/..%2Fcontent.v2");
+  });
+});
+
+describe("SDK v1 waitUntilReady with more than one Presentation", () => {
+  it("throws MultiplePresentationsError naming them, not InvalidResponseError", async () => {
+    const client = new Inklet({
+      pat: PAT,
+      fetch: async () =>
+        json(analysisFixture({
+          state: "completed",
+          target: { displayIds: [DISPLAY_ID, "display_2"] },
+          presentationIds: [PRESENTATION_ID, OTHER_PRESENTATION_ID],
+        })),
+    });
+
+    await assert.rejects(client.presentations.waitUntilReady(ANALYSIS_ID), (error) => {
+      assert.ok(error instanceof MultiplePresentationsError);
+      assert.equal(error.code, "analysis_multiple_presentations");
+      assert.equal(error.analysisId, ANALYSIS_ID);
+      assert.deepEqual(error.presentationIds, [PRESENTATION_ID, OTHER_PRESENTATION_ID]);
+      assert.deepEqual(error.details.presentationIds, [PRESENTATION_ID, OTHER_PRESENTATION_ID]);
+      assert.match(error.message, /produced 2 Presentations/);
+      return true;
+    });
+  });
+});

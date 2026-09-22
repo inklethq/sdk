@@ -1,10 +1,6 @@
 import {
-  ContentsResource,
   createIdempotencyKey,
-  delay,
-  expectEnum,
   parseProblem,
-  throwIfAborted,
   validateEnumOption,
   validateIdempotencyKey,
   validateWaitNumber,
@@ -14,6 +10,7 @@ import {
   ConfigurationError,
   InvalidResponseError,
   OperationTimeoutError,
+  withIdempotencyKey,
 } from "./errors.js";
 import {
   analysisEventTimeline,
@@ -27,17 +24,22 @@ import {
   type TimelineOptions,
   type WatchAnalysisOptions,
 } from "./events.js";
+import { pollUntil } from "./polling.js";
 import type { PresentationProblem } from "./presentations.js";
 import {
   SDK_API_PREFIX,
   appendCursorAndLimit,
+  callOptions,
   encodePathSegment,
+  expectEnum,
   expectRecord,
   expectString,
   expectStringArray,
   nullableRecord,
   nullableString,
   parsePage,
+  requireId,
+  type CallOptions,
   type ResourceTransport,
 } from "./resource.js";
 import {
@@ -47,6 +49,12 @@ import {
   type PresentationOutputRequest,
 } from "./scene.js";
 
+/**
+ * The values this SDK knows for each Analysis field below. They are what the
+ * request side accepts; the fields on a parsed `Analysis` are open instead
+ * (`AnalysisState | (string & {})`), so a value the backend adds later is
+ * passed through as a string rather than failing the read.
+ */
 export type AnalysisMode = "ai" | "direct";
 export type AnalysisTrigger = "api" | "scheduled";
 export type AnalysisState = "queued" | "running" | "completed" | "failed";
@@ -93,13 +101,18 @@ export type AnalysisTarget =
 
 export interface Analysis {
   id: string;
-  mode: AnalysisMode;
-  trigger: AnalysisTrigger;
-  state: AnalysisState;
-  outcome: AnalysisOutcome | null;
+  mode: AnalysisMode | (string & {});
+  trigger: AnalysisTrigger | (string & {});
+  /**
+   * `completed` and `failed` are final. Any other value — including one this
+   * SDK does not know — means the Analysis may still change, and `wait()`
+   * keeps waiting on it.
+   */
+  state: AnalysisState | (string & {});
+  outcome: AnalysisOutcome | (string & {}) | null;
   noChangeReason: string | null;
   contentIds: readonly string[];
-  context: AnalysisContext;
+  context: AnalysisContext | (string & {});
   scope: AnalysisScope | null;
   intent: string | null;
   title: string | null;
@@ -128,6 +141,10 @@ export interface AnalyzeInput {
   title?: string | null;
   /** Omit to let the agent choose Displays. */
   target?: AnalysisTargetInput;
+  /**
+   * Generated when omitted. Any `InkletError` the call throws carries the key
+   * it sent as `idempotencyKey`, so a retry can reuse it.
+   */
   idempotencyKey?: string;
 }
 
@@ -135,6 +152,7 @@ export interface DirectInput {
   /** A Content holding exactly one PNG or JPEG image. */
   contentId: string;
   target: AnalysisTargetInput;
+  /** Generated when omitted; see `AnalyzeInput.idempotencyKey`. */
   idempotencyKey?: string;
 }
 
@@ -143,7 +161,7 @@ export interface CreateAnalysisRequest extends Omit<AnalyzeInput, "idempotencyKe
   mode: AnalysisMode;
 }
 
-export interface ListAnalysesOptions {
+export interface ListAnalysesOptions extends CallOptions {
   /** Only Analyses that listed this Content in contentIds (role "input"). */
   contentId?: string;
   state?: AnalysisState;
@@ -155,8 +173,13 @@ export interface ListAnalysesOptions {
 export interface WaitForAnalysisOptions {
   /** Defaults to 1,000 ms. */
   pollIntervalMs?: number;
-  /** Defaults to 120,000 ms. Raise it for queued history Analyses. */
+  /**
+   * The whole wait, reads included: a read still in flight when it runs out
+   * is cancelled. Defaults to 120,000 ms. Raise it for queued history
+   * Analyses.
+   */
   timeoutMs?: number;
+  /** Cancels the wait, and a read in flight with it. */
   signal?: AbortSignal;
 }
 
@@ -165,7 +188,7 @@ const SCOPE_PATTERN = /^\d+[mhd]$/;
 export class AnalysesResource {
   readonly #transport: ResourceTransport;
 
-  constructor(transport: ResourceTransport, _contents?: ContentsResource) {
+  constructor(transport: ResourceTransport) {
     this.#transport = transport;
   }
 
@@ -180,17 +203,25 @@ export class AnalysesResource {
    * `context: "history"` Analyses run one at a time per user, so this one may
    * sit in `queued` for a while rather than being rejected. Only a user over
    * the backend's queue limit gets `409 analysis_in_progress`.
+   *
+   * Never retried automatically. If it fails, `error.idempotencyKey` is the
+   * key it sent — generated when `input` had none — and calling again with it
+   * cannot start a second Analysis.
    */
-  async analyze(input: AnalyzeInput = {}): Promise<Analysis> {
+  async analyze(input: AnalyzeInput = {}, options: CallOptions = {}): Promise<Analysis> {
     if (!input || typeof input !== "object") {
       throw new ConfigurationError("analyze requires an input object.");
     }
     const { idempotencyKey, ...rest } = input;
-    return this.create({ mode: "ai", ...rest }, idempotencyKey ?? createIdempotencyKey());
+    return this.create(
+      { mode: "ai", ...rest },
+      idempotencyKey ?? createIdempotencyKey(),
+      options,
+    );
   }
 
   /** Show one uploaded image without AI. Server-side scaling matches Hardcode. */
-  async direct(input: DirectInput): Promise<Analysis> {
+  async direct(input: DirectInput, options: CallOptions = {}): Promise<Analysis> {
     if (!input || typeof input !== "object") {
       throw new ConfigurationError("direct requires an input object.");
     }
@@ -208,27 +239,39 @@ export class AnalysesResource {
         target: input.target,
       },
       input.idempotencyKey ?? createIdempotencyKey(),
+      options,
     );
   }
 
+  /**
+   * Start an Analysis with `mode` explicit; `analyze()` and `direct()` wrap
+   * this. Every error it throws carries `idempotencyKey`.
+   */
   async create(
     input: CreateAnalysisRequest,
     idempotencyKey: string,
+    options: CallOptions = {},
   ): Promise<Analysis> {
     const body = normalizeCreateRequest(input);
     validateIdempotencyKey(idempotencyKey);
-    const response = await this.#transport.request(`${SDK_API_PREFIX}/analyses`, {
-      method: "POST",
-      headers: { "idempotency-key": idempotencyKey },
-      json: body,
-    });
-    return parseAnalysis(expectRecord(response));
+    try {
+      const response = await this.#transport.request(`${SDK_API_PREFIX}/analyses`, {
+        ...callOptions(options),
+        method: "POST",
+        headers: { "idempotency-key": idempotencyKey },
+        json: body,
+      });
+      return parseAnalysis(expectRecord(response));
+    } catch (error) {
+      throw withIdempotencyKey(error, idempotencyKey);
+    }
   }
 
-  async retrieve(analysisId: string): Promise<Analysis> {
+  async retrieve(analysisId: string, options: CallOptions = {}): Promise<Analysis> {
     const id = encodePathSegment(analysisId, "analysisId");
     const response = await this.#transport.request(
       `${SDK_API_PREFIX}/analyses/${id}`,
+      callOptions(options),
     );
     return parseAnalysis(expectRecord(response));
   }
@@ -237,7 +280,8 @@ export class AnalysesResource {
     const query = new URLSearchParams();
     appendCursorAndLimit(query, options);
     if (options.contentId !== undefined) {
-      query.set("contentId", encodePathSegment(options.contentId, "contentId"));
+      // URLSearchParams encodes it; encoding it first would send `%2520`.
+      query.set("contentId", requireId(options.contentId, "contentId"));
     }
     if (options.state !== undefined) {
       validateEnumOption(
@@ -254,6 +298,7 @@ export class AnalysesResource {
     const suffix = query.size === 0 ? "" : `?${query.toString()}`;
     const response = await this.#transport.request(
       `${SDK_API_PREFIX}/analyses${suffix}`,
+      callOptions(options),
     );
     return parsePage(response, parseAnalysis);
   }
@@ -271,6 +316,12 @@ export class AnalysesResource {
    * user's other history Analyses and can stay `queued` far longer, so raise
    * it for those, e.g. `wait(analysis, { timeoutMs: 15 * 60_000 })`. A timeout
    * does not cancel the Analysis: `analyses.retrieve()` still returns it later.
+   *
+   * A `state` this SDK does not know is not final: the wait goes on until the
+   * Analysis is `completed` or `failed`, `timeoutMs` runs out, or `signal`
+   * aborts. Up to three failed reads in a row — a dropped connection, a
+   * timeout, `408`, `429`, or `5xx` — are retried with backoff before the
+   * error is thrown.
    */
   async wait(
     analysisOrId: Analysis | string,
@@ -284,46 +335,37 @@ export class AnalysesResource {
     const timeoutMs = validateWaitNumber(
       options.timeoutMs, 120_000, 1, 30 * 60_000, "timeoutMs",
     );
-    const startedAt = Date.now();
-    let analysis = typeof analysisOrId === "string" ? undefined : analysisOrId;
-
-    while (true) {
-      throwIfAborted(options.signal, "Waiting for the Analysis was aborted.");
-      analysis = analysis ?? (await this.retrieve(analysisId));
-
-      if (analysis.state === "failed") {
-        throw new AnalysisFailedError(
-          analysis.failure?.message ?? "Inklet could not complete the Analysis.",
-          {
-            analysisId: analysis.id,
-            details: analysis.failure
-              ? {
-                  stage: analysis.failure.stage,
-                  retryable: analysis.failure.retryable,
-                  backendCode: analysis.failure.code,
-                }
-              : undefined,
-          },
-        );
-      }
-      if (analysis.state === "completed") {
-        return analysis;
-      }
-
-      const elapsed = Date.now() - startedAt;
-      if (elapsed >= timeoutMs) {
-        throw new OperationTimeoutError(
-          `Analysis ${analysis.id} did not finish within ${timeoutMs} ms.`,
-          { details: { analysisId: analysis.id, timeoutMs } },
-        );
-      }
-      await delay(
-        Math.min(pollIntervalMs, timeoutMs - elapsed),
-        options.signal,
-        "Waiting for the Analysis was aborted.",
-      );
-      analysis = undefined;
-    }
+    return pollUntil({
+      signal: options.signal,
+      timeoutMs,
+      pollIntervalMs,
+      abortMessage: "Waiting for the Analysis was aborted.",
+      initial: typeof analysisOrId === "string" ? undefined : analysisOrId,
+      read: (signal) => this.retrieve(analysisId, { signal }),
+      settle: (analysis) => {
+        if (analysis.state === "failed") {
+          throw new AnalysisFailedError(
+            analysis.failure?.message ?? "Inklet could not complete the Analysis.",
+            {
+              analysisId: analysis.id,
+              details: analysis.failure
+                ? {
+                    stage: analysis.failure.stage,
+                    retryable: analysis.failure.retryable,
+                    backendCode: analysis.failure.code,
+                  }
+                : undefined,
+            },
+          );
+        }
+        return analysis.state === "completed" ? analysis : undefined;
+      },
+      timeout: (analysis, cause) =>
+        new OperationTimeoutError(
+          `Analysis ${analysis?.id ?? analysisId} did not finish within ${timeoutMs} ms.`,
+          { details: { analysisId: analysis?.id ?? analysisId, timeoutMs }, cause },
+        ),
+    });
   }
 
   /**
@@ -345,9 +387,15 @@ export class AnalysesResource {
    * The SDK reads the server-sent event stream and falls back to polling
    * `listEvents()` when the response is not `text/event-stream`, which is what
    * a proxy that cannot carry streaming responses returns. A dropped
-   * connection is resumed from the last `seq` (up to five attempts with
-   * exponential back-off), so events are not lost across a reconnect, and
-   * iteration ends once the Analysis reaches `completed` or `failed`.
+   * connection — or a `408`, `429`, or `5xx` answer to reconnecting — is
+   * resumed from the last `seq` (up to five attempts in a row with exponential
+   * back-off that honours `Retry-After`), so events are not lost across a
+   * reconnect, and iteration ends once the Analysis reaches `completed` or
+   * `failed`. A state this SDK does not know is not final, so polling carries
+   * on through it until `signal` aborts.
+   *
+   * `timeoutMs` bounds how long each connection attempt may take to answer,
+   * not how long the stream stays open; `signal` stops everything.
    *
    * ```ts
    * for await (const event of inklet.analyses.watch(analysis.id)) {
@@ -384,8 +432,8 @@ export class AnalysesResource {
    * has no archive, for example while it is still running or after retention
    * has expired.
    */
-  async archive(analysisId: string): Promise<AnalysisArchive> {
-    return retrieveAnalysisArchive(this.#transport, analysisId);
+  async archive(analysisId: string, options: CallOptions = {}): Promise<AnalysisArchive> {
+    return retrieveAnalysisArchive(this.#transport, analysisId, options);
   }
 }
 
@@ -528,21 +576,15 @@ function normalizeTarget(target: AnalysisTargetInput): AnalysisTargetInput {
 
 export function parseAnalysis(record: Record<string, unknown>): Analysis {
   const outcome = record.outcome ?? null;
-  if (outcome !== null && outcome !== "presentations" && outcome !== "no_change") {
-    throw new InvalidResponseError();
-  }
   return {
     id: expectString(record, "id"),
-    mode: expectEnum(record.mode, ["ai", "direct"] as const),
-    trigger: expectEnum(record.trigger ?? "api", ["api", "scheduled"] as const),
-    state: expectEnum(
-      record.state,
-      ["queued", "running", "completed", "failed"] as const,
-    ),
-    outcome,
+    mode: expectEnum<AnalysisMode>(record.mode),
+    trigger: expectEnum<AnalysisTrigger>(record.trigger ?? "api"),
+    state: expectEnum<AnalysisState>(record.state),
+    outcome: outcome === null ? null : expectEnum<AnalysisOutcome>(outcome),
     noChangeReason: nullableString(record.noChangeReason),
     contentIds: expectStringArray(record.contentIds ?? []),
-    context: expectEnum(record.context, ["submitted", "history"] as const),
+    context: expectEnum<AnalysisContext>(record.context),
     scope: parseScope(record.scope ?? null),
     intent: nullableString(record.intent),
     title: nullableString(record.title),

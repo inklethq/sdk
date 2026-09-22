@@ -1,7 +1,13 @@
 import {
+  ApiError,
   AuthenticationFailedError,
   Inklet,
+  InkletError,
+  MultiplePresentationsError,
+  NetworkError,
   NoChangeError,
+  RateLimitError,
+  RequestTimeoutError,
   SubscriptionRequiredError,
   describeEvent,
   isAnalysisEvent,
@@ -34,12 +40,16 @@ import {
   type TimelineOptions,
   type WatchAnalysisOptions,
   type AutoPushInput,
+  type CallOptions,
   type Content,
+  type ContentState,
   type Display,
   type DisplayAdvanceResult,
   type GeneratePresentationInput,
   type HardcodePushInput,
   type InkletClientOptions,
+  type InkletRequestBody,
+  type InkletRequestHeaders,
   type InkletRequestOptions,
   type ListPresentationsOptions,
   type Presentation,
@@ -49,6 +59,7 @@ import {
   type PresentationPage,
   type PresentationProblem,
   type PresentationRenditionState,
+  type PresentationState,
   type WaitUntilCurrentOptions,
 } from "@inklethq/sdk";
 
@@ -56,15 +67,96 @@ const options = {
   pat: "inklet_pat_typecheck",
   baseUrl: "http://127.0.0.1:8787/v1",
   fetch: async () => Response.json({ ok: true }),
+  timeoutMs: 30_000,
+  uploadTimeoutMs: 10 * 60_000,
 } satisfies InkletClientOptions;
 
 const client = new Inklet(options);
 const requestOptions = {
   method: "POST",
   json: { text: "Hello, Inklet" },
+  timeoutMs: 5_000,
+  signal: AbortSignal.timeout(10_000),
 } satisfies InkletRequestOptions;
 
 void client.request<{ ok: boolean }>("/typecheck", requestOptions);
+
+// Headers and bodies are the SDK's own structural types, so none of this
+// needs the DOM lib; the usual shapes still fit.
+const headerShapes: InkletRequestHeaders[] = [
+  { "x-trace": "1" },
+  [["x-trace", "1"]],
+  new Headers({ "x-trace": "1" }),
+];
+const bodyShapes: InkletRequestBody[] = [
+  "text",
+  new Uint8Array([1]),
+  new ArrayBuffer(1),
+  new Blob(["x"]),
+  new URLSearchParams({ a: "1" }),
+  new FormData(),
+];
+void headerShapes;
+void bodyShapes;
+
+// Every resource method takes a signal and a per-call timeout.
+const call = {
+  signal: new AbortController().signal,
+  timeoutMs: 5_000,
+} satisfies CallOptions;
+void client.contents.retrieve("content_123", call);
+void client.contents.list({ state: "ready", ...call });
+void client.contents.create({ assets: [{ type: "text", text: "Hi" }] }, "key-12345678", call);
+void client.contents.refreshUploadTickets("content_123", [0], call);
+void client.analyses.retrieve("analysis_123", call);
+void client.analyses.list({ state: "running", ...call });
+void client.analyses.archive("analysis_123", call);
+void client.analyses.listEvents("analysis_123", { after: 1, ...call });
+void client.displays.list(call);
+void client.displays.retrieve("display_123", call);
+void client.displays.listQueue("display_123", call);
+void client.displays.current("display_123", { format: "png", ...call });
+void client.displays.setCurrent("display_123", "presentation_123", call);
+void client.displays.advance("display_123", call);
+void client.presentations.retrieve("presentation_123", call);
+void client.presentations.list({ scope: "all", ...call });
+void client.presentations.render("presentation_123", { preset: "p" }, call);
+void client.analyze({ contentIds: ["content_123"] }, call);
+void client.direct({ contentId: "content_123", target: { displayId: "d" } }, call);
+
+// Request-side values stay closed: sending one the backend does not know can
+// only fail.
+// @ts-expect-error not a Content state this SDK can ask for
+void client.contents.list({ state: "archived" });
+// @ts-expect-error not a Presentation state this SDK can ask for
+void client.presentations.list({ state: "archived" });
+
+void (async () => {
+  try {
+    await client.push.auto({ assets: [client.assets.text("Hi")] });
+  } catch (error) {
+    if (error instanceof InkletError) {
+      const key: string | undefined = error.idempotencyKey;
+      void key;
+    }
+    if (error instanceof RequestTimeoutError) {
+      const network: NetworkError = error;
+      const timeoutMs: number = error.timeoutMs;
+      void network;
+      void timeoutMs;
+    }
+    if (error instanceof RateLimitError || error instanceof ApiError) {
+      const retryAfterMs: number | null = error.retryAfterMs;
+      void retryAfterMs;
+    }
+    if (error instanceof MultiplePresentationsError) {
+      const ids: readonly string[] = error.presentationIds;
+      const analysisId: string = error.analysisId;
+      void ids;
+      void analysisId;
+    }
+  }
+})();
 
 const autoInput = {
   idempotencyKey: "typecheck-auto-1",
@@ -128,10 +220,31 @@ const generation = client.presentations.generate(generationInput);
 void generation.then(async (value) => {
   const presentation = await client.presentations.waitUntilReady(value);
   const refs: readonly PresentationContentRef[] = presentation.contentIds;
-  const role: PresentationContentRole | undefined = refs[0]?.role;
-  const mode: "ai" | "direct" = presentation.mode;
+  // Values read from a response are open: known literals for completion and
+  // narrowing, plus any string a newer backend sends.
+  const role: PresentationContentRole | (string & {}) | undefined = refs[0]?.role;
+  const mode: "ai" | "direct" | (string & {}) = presentation.mode;
+  const state: PresentationState | (string & {}) = presentation.state;
+  // @ts-expect-error a response state may be one this SDK does not know
+  const closed: PresentationState = presentation.state;
   void role;
   void mode;
+  void state;
+  void closed;
+});
+
+void client.contents.retrieve("content_123").then((content) => {
+  const state: ContentState | (string & {}) = content.state;
+  switch (content.state) {
+    case "pending":
+    case "ready":
+    case "failed":
+      break;
+    default:
+      // Reachable: a state added after this SDK shipped.
+      void content.state.length;
+  }
+  void state;
 });
 
 const waitUntilCurrentOptions = {
@@ -163,15 +276,15 @@ void setCurrentPromise.then(() =>
 void client.displays.listQueue("display_123").then((page) => {
   const item = page.items[0];
   const refs: readonly PresentationContentRef[] | undefined = item?.contentIds;
-  const mode: "ai" | "direct" | undefined = item?.mode;
+  const mode: "ai" | "direct" | (string & {}) | undefined = item?.mode;
   void refs;
   void mode;
 });
 void client.presentations
   .render("presentation_123", { preset: "macos-widget-medium" })
   .then((rendition) => {
-    const state: PresentationRenditionState = rendition.state;
-    const colorMode: PresentationColorMode = rendition.colorMode;
+    const state: PresentationRenditionState | (string & {}) = rendition.state;
+    const colorMode: PresentationColorMode | (string & {}) = rendition.colorMode;
     const url: string | null = rendition.url;
     const expiresAt: string | null = rendition.expiresAt;
     const failure: PresentationProblem | null = rendition.failure;
@@ -207,12 +320,14 @@ const listEventsOptions = {
 const watchOptions = {
   after: 12,
   signal: new AbortController().signal,
+  timeoutMs: 10_000,
   pollIntervalMs: 1_000,
   reconnectDelayMs: 500,
 } satisfies WatchAnalysisOptions;
 
 const timelineOptions = {
   pageSize: 100,
+  timeoutMs: 10_000,
 } satisfies TimelineOptions;
 
 // `detail` is gone from both readers, and from the event itself.
@@ -229,7 +344,7 @@ const eventPagePromise: Promise<AnalysisEventPage> = client.analyses.listEvents(
 );
 void eventPagePromise.then((page) => {
   const nextAfter: number | null = page.nextAfter;
-  const state: "queued" | "running" | "completed" | "failed" = page.state;
+  const state: "queued" | "running" | "completed" | "failed" | (string & {}) = page.state;
   void nextAfter;
   void state;
 });
@@ -241,8 +356,8 @@ const liveEvents: AsyncIterable<AnalysisEvent> = client.analyses.watch(
 void (async () => {
   const collected: AnalysisEvent[] = [];
   for await (const event of liveEvents) {
-    const level: AnalysisEventLevel = event.level;
-    const source: AnalysisEventSource = event.source;
+    const level: AnalysisEventLevel | (string & {}) = event.level;
+    const source: AnalysisEventSource | (string & {}) = event.source;
     const type: AnalysisEventType | (string & {}) = event.type;
     const summary: string = event.summary;
     const line: string = describeEvent(event);
@@ -252,8 +367,8 @@ void (async () => {
     if (isAnalysisEvent(event, "agent.activity")) {
       const activity: AgentActivityData = event.data;
       const activityId: string = activity.activityId;
-      const kind: AgentActivityKind = activity.kind;
-      const state: AgentActivityState = activity.state;
+      const kind: AgentActivityKind | (string & {}) = activity.kind;
+      const state: AgentActivityState | (string & {}) = activity.state;
       const stats: AgentActivityStats = activity.stats;
       const notesRead: number | undefined = stats.notesRead;
       const chosen: string | null | undefined = stats.chosen;
@@ -264,7 +379,7 @@ void (async () => {
       void chosen;
     } else if (isAnalysisEvent(event, "plan.rejected")) {
       const rejected: PlanRejectedData = event.data;
-      const reason: PlanRejectedReason = rejected.reason;
+      const reason: PlanRejectedReason | (string & {}) = rejected.reason;
       const problems: number = rejected.problems;
       void reason;
       void problems;

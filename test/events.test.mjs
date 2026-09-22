@@ -1,15 +1,20 @@
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
-import {
+import { it } from "node:test";
+import { describeFor, loadSdk } from "./sdk.mjs";
+
+const describe = describeFor(import.meta.url);
+const {
+  ApiError,
   ConfigurationError,
   Inklet,
   InvalidResponseError,
   NetworkError,
   NotFoundError,
   OperationAbortedError,
+  RateLimitError,
   describeEvent,
   mergeActivities,
-} from "../dist/esm/index.js";
+} = await loadSdk(import.meta.url);
 
 const PAT = "il_pat_test_abcdefghijklmnopqrstuvwxyz";
 const ANALYSIS_ID = "01952345-6789-7abc-def0-123456789abc";
@@ -504,24 +509,29 @@ describe("SDK v1 Analysis event reads", () => {
       omit(eventFixture(1), "summary"),
       omit(eventFixture(1), "at"),
       { ...eventFixture(1), seq: 1.5 },
-      { ...eventFixture(1), source: "user" },
-      { ...eventFixture(1), level: "debug" },
+      // An enum the SDK does not know passes; one that is not a string does not.
+      { ...eventFixture(1), source: 7 },
+      { ...eventFixture(1), level: null },
       { ...eventFixture(1), type: "" },
       { ...eventFixture(1), data: [1, 2] },
       // A known type whose own fields are missing or out of range.
       activity({ activityId: undefined }),
-      activity({ kind: "daydreaming" }),
-      activity({ state: "paused" }),
+      activity({ kind: undefined }),
+      activity({ kind: 3 }),
+      activity({ state: "" }),
       activity({ steps: -1 }),
       activity({ stats: { notesRead: "many" } }),
       activity({ stats: { chosen: 7 } }),
       eventFixture(1, { type: "plan.rejected", data: { problems: 1, attempt: 1 } }),
       eventFixture(1, {
         type: "plan.rejected",
-        data: { problems: 1, reason: "vibes", attempt: 1 },
+        data: { problems: 1, reason: 42, attempt: 1 },
       }),
       eventFixture(1, { type: "plan.submitted", data: { outcome: "presentations" } }),
-      eventFixture(1, { type: "analysis.completed", data: { outcome: "maybe" } }),
+      eventFixture(1, {
+        type: "analysis.completed",
+        data: { outcome: false, presentations: 1 },
+      }),
       eventFixture(1, { type: "analysis.failed", data: {} }),
       eventFixture(1, { type: "analysis.lease_expired", data: {} }),
       eventFixture(1, { type: "analysis.lease_expired", data: { attempt: "two" } }),
@@ -1012,6 +1022,328 @@ describe("describeEvent", () => {
     const snapshot = structuredClone(original);
     describeEvent(original);
     assert.deepEqual(original, snapshot);
+  });
+});
+
+describe("SDK v1 event values the backend adds later", () => {
+  it("passes every enum it does not know through instead of failing the page", async () => {
+    const client = new Inklet({
+      pat: PAT,
+      fetch: async () =>
+        json({
+          items: [
+            eventFixture(1, { source: "system", level: "debug" }),
+            activity({ kind: "daydreaming", state: "paused" }),
+            eventFixture(3, { type: "plan.rejected", data: { problems: 1, reason: "vibes", attempt: 1 } }),
+            eventFixture(4, { type: "plan.submitted", data: { round: 1, outcome: "deferred" } }),
+            eventFixture(5, { type: "analysis.completed", data: { outcome: "deferred", presentations: 0 } }),
+          ],
+          nextAfter: 5,
+          hasMore: false,
+          state: "paused",
+        }),
+    });
+
+    const page = await client.analyses.listEvents(ANALYSIS_ID);
+    assert.equal(page.state, "paused");
+    assert.equal(page.items[0].source, "system");
+    assert.equal(page.items[0].level, "debug");
+    assert.equal(page.items[1].data.kind, "daydreaming");
+    assert.equal(page.items[1].data.state, "paused");
+    assert.equal(page.items[2].data.reason, "vibes");
+    assert.equal(page.items[3].data.outcome, "deferred");
+    assert.equal(page.items[4].data.outcome, "deferred");
+  });
+
+  it("describes what it does not know without inventing anything", () => {
+    const cases = [
+      // An unknown kind reads like `other`: from its step count.
+      [{ kind: "daydreaming", state: "active", steps: 3 }, "Working · 3 steps"],
+      [{ kind: "daydreaming", state: "done", steps: 3 }, "Worked through 3 steps"],
+      // An unknown state is not known to be final, so it reads as running.
+      [{ kind: "reading_brief", state: "paused" }, "Reading the brief"],
+      [{ kind: "reading_notes", state: "paused", stats: { notesRead: 2 } }, "Reading your notes · 2 read"],
+    ];
+    for (const [data, expected] of cases) {
+      assert.equal(describeEvent(activityEvent(1, "a1", data)), expected, `${data.kind}/${data.state}`);
+    }
+
+    for (const reason of ["vibes", "constructor", "toString", "__proto__"]) {
+      assert.equal(
+        describeEvent({ ...event(1, "plan.rejected"), data: { problems: 1, reason, attempt: 1 } }),
+        "The plan was sent back — trying again (1 problem)",
+        reason,
+      );
+    }
+    assert.equal(
+      describeEvent({ ...event(1, "analysis.completed"), data: { outcome: "deferred", presentations: 2 } }),
+      "Finished · 2 Presentations",
+    );
+  });
+
+  it("merges activities whose state it does not know like any other", () => {
+    const merged = mergeActivities([
+      activityEvent(1, "a1", { state: "active" }),
+      activityEvent(2, "a1", { state: "paused" }),
+      activityEvent(3, "a1", { state: "done" }),
+    ]);
+    assert.deepEqual(merged.map((e) => e.seq), [3]);
+  });
+});
+
+describe("SDK v1 Analysis event stream reconnects", () => {
+  for (const status of [408, 429, 500, 502, 503, 504]) {
+    it(`reconnects after a ${status} from the stream endpoint`, async () => {
+      const requests = [];
+      const client = new Inklet({
+        pat: PAT,
+        fetch: async (input, init = {}) => {
+          requests.push({ url: new URL(input), headers: new Headers(init.headers) });
+          if (requests.length === 1) {
+            return sse([frame(1), frame(2)]);
+          }
+          if (requests.length === 2) {
+            return json({ error: { code: "busy", message: "Try again." } }, status);
+          }
+          return sse([frame(3), "event: end\ndata: {}\n\n"]);
+        },
+      });
+
+      const seen = await drain(client.analyses.watch(ANALYSIS_ID, { reconnectDelayMs: 10 }));
+      assert.deepEqual(seen, [1, 2, 3]);
+      assert.equal(requests.length, 3);
+      assert.equal(requests[2].headers.get("last-event-id"), "2");
+    });
+  }
+
+  it("waits out a Retry-After that is longer than its own backoff", async () => {
+    const at = [];
+    const client = new Inklet({
+      pat: PAT,
+      fetch: async () => {
+        at.push(Date.now());
+        if (at.length === 1) {
+          return json(
+            { error: { code: "rate_limited", message: "Slow down." } },
+            429,
+            { "retry-after": "1" },
+          );
+        }
+        return sse([frame(1), "event: end\ndata: {}\n\n"]);
+      },
+    });
+
+    assert.deepEqual(
+      await drain(client.analyses.watch(ANALYSIS_ID, { reconnectDelayMs: 10 })),
+      [1],
+    );
+    assert.ok(at[1] - at[0] >= 950, `reconnected after ${at[1] - at[0]} ms`);
+  });
+
+  it("hands back a Retry-After it will not sleep through", async () => {
+    let calls = 0;
+    const client = new Inklet({
+      pat: PAT,
+      fetch: async () => {
+        calls += 1;
+        return json(
+          { error: { code: "rate_limited", message: "Come back later." } },
+          429,
+          { "retry-after": "120" },
+        );
+      },
+    });
+
+    const startedAt = Date.now();
+    await assert.rejects(drain(client.analyses.watch(ANALYSIS_ID)), (error) => {
+      assert.ok(error instanceof RateLimitError);
+      assert.equal(error.retryAfterMs, 120_000);
+      return true;
+    });
+    assert.equal(calls, 1);
+    assert.ok(Date.now() - startedAt < 1_000);
+  });
+
+  it("gives up on repeated server errors within the same budget", async () => {
+    let calls = 0;
+    const client = new Inklet({
+      pat: PAT,
+      fetch: async () => {
+        calls += 1;
+        return json({ error: { code: "internal_error", message: "Oops." } }, 500);
+      },
+    });
+    await assert.rejects(
+      drain(client.analyses.watch(ANALYSIS_ID, { reconnectDelayMs: 10 })),
+      (error) => error instanceof ApiError && error.status === 500,
+    );
+    assert.equal(calls, 1 + 5);
+  });
+
+  it("does not retry a quota that is spent", async () => {
+    let calls = 0;
+    const client = new Inklet({
+      pat: PAT,
+      fetch: async () => {
+        calls += 1;
+        return json({ error: { code: "quota_exceeded", message: "Spent." } }, 429);
+      },
+    });
+    await assert.rejects(
+      drain(client.analyses.watch(ANALYSIS_ID, { reconnectDelayMs: 10 })),
+      (error) => error instanceof RateLimitError && error.code === "quota_exceeded",
+    );
+    assert.equal(calls, 1);
+  });
+
+  it("ends on an `end` frame that carries no data line", async () => {
+    let calls = 0;
+    const client = new Inklet({
+      pat: PAT,
+      fetch: async () => {
+        calls += 1;
+        return sse([frame(1), "event: ping\n\n", frame(2), "event: end\n\n"]);
+      },
+    });
+    assert.deepEqual(await drain(client.analyses.watch(ANALYSIS_ID, { reconnectDelayMs: 10 })), [1, 2]);
+    // Read as the end of the stream, not as a drop to reconnect from.
+    assert.equal(calls, 1);
+  });
+
+  it("times out connecting, then reconnects, but never times out an open stream", async () => {
+    let calls = 0;
+    const client = new Inklet({
+      pat: PAT,
+      fetch: async (_input, init = {}) => {
+        calls += 1;
+        if (calls === 1) {
+          // Never answers: only the per-attempt timeout ends this one.
+          return new Promise((_resolve, reject) => {
+            init.signal.addEventListener("abort", () => reject(init.signal.reason), { once: true });
+          });
+        }
+        return new Response(
+          new ReadableStream({
+            async start(controller) {
+              const encoder = new TextEncoder();
+              controller.enqueue(encoder.encode(frame(1)));
+              // Longer than timeoutMs between two events.
+              await new Promise((resolve) => setTimeout(resolve, 80));
+              controller.enqueue(encoder.encode(frame(2)));
+              controller.enqueue(encoder.encode("event: end\n\n"));
+              controller.close();
+            },
+          }),
+          { headers: { "content-type": "text/event-stream" } },
+        );
+      },
+    });
+
+    assert.deepEqual(
+      await drain(client.analyses.watch(ANALYSIS_ID, { timeoutMs: 30, reconnectDelayMs: 10 })),
+      [1, 2],
+    );
+    assert.equal(calls, 2);
+  });
+
+  it("aborts while still connecting", async () => {
+    const controller = new AbortController();
+    const client = new Inklet({
+      pat: PAT,
+      fetch: (_input, init = {}) =>
+        new Promise((_resolve, reject) => {
+          init.signal.addEventListener("abort", () => reject(init.signal.reason), { once: true });
+          setTimeout(() => controller.abort(), 10);
+        }),
+    });
+    await assert.rejects(
+      drain(client.analyses.watch(ANALYSIS_ID, { signal: controller.signal })),
+      OperationAbortedError,
+    );
+  });
+
+  it("rejects a bad timeoutMs when watch() or timeline() is called", () => {
+    const client = new Inklet({ pat: PAT, fetch: async () => json({}) });
+    assert.throws(() => client.analyses.watch(ANALYSIS_ID, { timeoutMs: 0 }), ConfigurationError);
+    assert.throws(() => client.analyses.timeline(ANALYSIS_ID, { timeoutMs: 1.5 }), ConfigurationError);
+  });
+});
+
+describe("SDK v1 event polling through transient failures", () => {
+  it("keeps the polling fallback going through a state it does not know", async () => {
+    let pages = 0;
+    const client = new Inklet({
+      pat: PAT,
+      fetch: async (input) => {
+        if (new URL(input).pathname === STREAM_PATH) {
+          return new Response("{}", { headers: { "content-type": "application/json" } });
+        }
+        pages += 1;
+        const states = ["running", "paused", "paused", "completed"];
+        return json({
+          items: pages === 1 ? [eventFixture(1)] : [],
+          nextAfter: pages === 1 ? 1 : null,
+          hasMore: false,
+          state: states[pages - 1],
+        });
+      },
+    });
+    assert.deepEqual(await drain(client.analyses.watch(ANALYSIS_ID, { pollIntervalMs: 100 })), [1]);
+    // An unknown state is not final: polling only stopped at `completed`.
+    assert.equal(pages, 4);
+  });
+
+  it("retries a failed page in the polling fallback", async () => {
+    let pages = 0;
+    const client = new Inklet({
+      pat: PAT,
+      fetch: async (input) => {
+        if (new URL(input).pathname === STREAM_PATH) {
+          return new Response("{}", { headers: { "content-type": "application/json" } });
+        }
+        pages += 1;
+        if (pages === 1) {
+          throw new TypeError("fetch failed");
+        }
+        if (pages === 2) {
+          return json({ error: { code: "internal_error", message: "Oops." } }, 502);
+        }
+        return json({ items: [eventFixture(7)], nextAfter: 7, hasMore: false, state: "failed" });
+      },
+    });
+    assert.deepEqual(
+      await drain(client.analyses.watch(ANALYSIS_ID, { reconnectDelayMs: 10 })),
+      [7],
+    );
+    assert.equal(pages, 3);
+  });
+
+  it("retries a failed timeline page", async () => {
+    let calls = 0;
+    const flaky = new Inklet({
+      pat: PAT,
+      fetch: async () => {
+        calls += 1;
+        return calls === 1
+          ? json({ error: { code: "internal_error", message: "Oops." } }, 503, { "retry-after": "0" })
+          : json({ items: [eventFixture(1)], nextAfter: null, hasMore: false, state: "completed" });
+      },
+    });
+    assert.deepEqual(await drain(flaky.analyses.timeline(ANALYSIS_ID)), [1]);
+    assert.equal(calls, 2);
+  });
+
+  it("does not retry a timeline page that failed for good", async () => {
+    let calls = 0;
+    const client = new Inklet({
+      pat: PAT,
+      fetch: async () => {
+        calls += 1;
+        return json({ error: { code: "analysis_not_found", message: "Gone." } }, 404);
+      },
+    });
+    await assert.rejects(drain(client.analyses.timeline(ANALYSIS_ID)), NotFoundError);
+    assert.equal(calls, 1);
   });
 });
 
