@@ -44,8 +44,8 @@ Display、Presentation、队列、current-presentation、上传票据、Scene v1
   FREE 7 天、PRO 不限。同一条地板也落在 `POST /analyses` 上：`scope.since` 在
   **创建时**被抬到地板，`scope.since` 原样回显、`scope.sinceAt` 是实际窗口——
   裁剪，不是拒绝。
-- **`Presentation` 新增 `title`**（接受计划时解析，回退链见后端
-  `internal/analysis/title.go`）。
+- **`Presentation` 新增 `title`**（接受计划时解析，回退链见
+  `CHANGELOG.md` 的 0.2.0 一节）。
 - **`no_compatible_display` 变成同步的 422**（见下面 §5.1 与 §8 的订正）。
 - **切屏的 409 带机器码**：`POST /displays/{displayId}/current` 的
   `409 presentation_not_deliverable` 带 `details = { displayId, presentationId,
@@ -55,10 +55,8 @@ Display、Presentation、队列、current-presentation、上传票据、Scene v1
   `reason ∈ target | layout_mismatch | content_refs | schema | other`；问题原文
   只在内部，公开读只给条数。
 - **§9「兼容旧 v0.1 SDK」整节作废。** `POST /contents/{contentId}/confirm` 已从
-  路由里移除（请求落到 facade 的 404，不是 409、也不是 410）；SDK 专用的 SQS 队列
-  `inklet-sdk-content` / `inklet-sdk-analysis` 与 `SQS_SDK_CONTENT_URL` /
-  `SQS_SDK_ANALYSIS_URL` 不再被任何代码读取；python worker 的 `sdk-analysis` 模式
-  已下线。SDK 的 Analysis 现在跑在 worker-agent 上。
+  路由里移除（请求落到 facade 的 404，不是 409、也不是 410）；SDK 专用的旧异步管线
+  已下线，SDK 的 Analysis 与其他 Analysis 走同一条执行路径。
 
 ## 1. 目标
 
@@ -137,7 +135,7 @@ Content 状态：
 
 后端通过两条路径把素材标记为已上传：
 
-1. **S3 事件通知**（主路径）：对象创建事件 → SQS → 后端 HeadObject 校验 → `assets[i].uploadState = uploaded`；全部到齐后 Content 变 `ready`。
+1. **S3 事件通知**（主路径）：对象创建事件 → 后端校验对象 → `assets[i].uploadState = uploaded`；全部到齐后 Content 变 `ready`。
 2. **惰性校验**（兜底）：`POST /analyses` 引用了 `pending` 的 Content 时，后端同步对未确认的素材做 HeadObject。仍缺失的返回 `409 asset_not_uploaded`，`details.failedAssets` 列出 `{ contentId, assetIndex }`；调用方补传后重试同一个 Analysis 请求。
 
 `POST /contents/{contentId}/upload-tickets` 保留，用于票据过期或上传失败后补票，语义不变。

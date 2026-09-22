@@ -1,6 +1,109 @@
 # Changelog
 
-## 0.2.2
+## 0.3.0
+
+The first release on npm since 0.1.0. 0.2.0, 0.2.1, and 0.2.2 were tagged but
+never reached the registry — their publish runs failed — so upgrading from
+0.1.0 brings everything listed under them as well as this. This release is
+about surviving a backend that grows under the SDK and a network that stalls.
+
+- **Breaking:** Fields the backend reports as a fixed set of words are open:
+  the values this SDK knows plus `(string & {})`. A value it has never seen
+  reads through instead of throwing `InvalidResponseError`, so a backend that
+  adds one no longer breaks every installed SDK. This covers `Content.state`;
+  `ContentAsset.type` and `.uploadState`; `Analysis.mode`, `.trigger`,
+  `.state`, `.context`, and `.outcome`; `Presentation.mode` and `.state`;
+  `PresentationContentRef.role`; `PresentationImage.format`;
+  `PresentationRendition.mediaType`, `.format`, `.colorMode`, and `.state`;
+  `PresentationOutput.formats` and `.colorMode`; `InkletSceneElement.type`;
+  `DisplayCapabilities.supportedOutputFormats`; `DisplayQueueItem.mode` and
+  `.state`; `AnalysisEvent.source` and `.level`; `AnalysisEventPage.state`;
+  `AgentActivityData.kind` and `.state`; `PlanRejectedData.reason`;
+  `PlanSubmittedData.outcome` and `AnalysisCompletedData.outcome`; and
+  `PushResult.state`. The named types (`AnalysisState`, `PresentationState`,
+  …) are still the closed sets, and request options still accept only those,
+  so assigning one of these fields to its named type no longer compiles, and
+  `=== "ready"` does not narrow the open member away. A value that is not a
+  non-empty string is still refused, and so are the retired Presentation
+  modes `auto`, `manual`, and `hardcode`. The waiting helpers treat an unknown
+  state as not finished yet; `describeEvent()` describes an unknown activity
+  kind like `other`, an unknown activity state as still running, and an
+  unknown rejection reason with its generic sentence.
+- **Breaking:** Every request has a timeout. Add `InkletClientOptions.timeoutMs`
+  (default 60,000 ms, each API request) and `.uploadTimeoutMs` (default
+  300,000 ms, each storage upload); either must be a whole number from 1 to
+  2,147,483,647, or the client throws `ConfigurationError`. A request that runs
+  out of time throws the new `RequestTimeoutError`, a `NetworkError` with
+  `code: "request_timed_out"` and `timeoutMs`. For `request()` the timeout runs
+  until the body is read; for `requestRaw()` and `watch()` it ends when the
+  headers arrive, so a long stream is not cut off.
+- Add `CallOptions { signal?, timeoutMs? }` as a trailing optional argument to
+  `contents.upload()`, `.create()`, `.retrieve()`, and
+  `.refreshUploadTickets()`; `analyses.analyze()`, `.direct()`, `.create()`,
+  `.retrieve()`, and `.archive()`; `presentations.generate()` and `.render()`;
+  `displays.retrieve()`, `.setCurrent()`, and `.advance()`; `push.auto()`,
+  `.manual()`, and `.hardcode()`; and `inklet.analyze()` / `inklet.direct()`.
+  `ListContentsOptions`, `ListAnalysesOptions`, `ListAnalysisEventsOptions`,
+  `ListPresentationsOptions`, `RetrievePresentationOptions`,
+  `ListDisplaysOptions`, and `CurrentPresentationOptions` extend it, and
+  `WatchAnalysisOptions`, `TimelineOptions`, and `InkletRequestOptions` gain
+  `timeoutMs`. An abort now cancels the request in flight — including inside
+  `waitUntil*()` and `analyses.wait()`, which used to notice it only between
+  polls — and throws `OperationAbortedError` with the signal's reason as
+  `cause`. A waiting helper's `timeoutMs` is now a hard deadline that also
+  cancels a hung read.
+- The waiting helpers, `analyses.wait()`, `timeline()`, and `watch()`'s polling
+  fallback ride out up to three transient failures in a row — a network error,
+  a timeout, or HTTP 408, 429 (but not `quota_exceeded`), 500, 502, 503, or
+  504 — backing off from the poll interval, doubling up to 30 s, and never
+  sooner than `Retry-After`. `watch()` reconnects on the same statuses within
+  its budget of five attempts. A `Retry-After` longer than 60 s is not slept
+  through; its error is thrown with `retryAfterMs` set. Calls that create or
+  change something are never retried.
+- Add `RateLimitError.retryAfterMs` and `ApiError.retryAfterMs`: the response's
+  `Retry-After`, delta-seconds or an HTTP-date, in milliseconds, or `null`.
+- Add `InkletError.idempotencyKey`. Every error from a call that sent an
+  `Idempotency-Key` carries it, including one the SDK generated, so a call that
+  failed after the backend may already have acted on it — `push.*`,
+  `presentations.generate()`, `analyze()`, `contents.upload()` — can be retried
+  under the same key instead of creating a duplicate Content.
+- **Breaking:** `presentations.waitUntilReady()` throws the new
+  `MultiplePresentationsError` (`code: "analysis_multiple_presentations"`, with
+  `analysisId` and `presentationIds`) instead of `InvalidResponseError` when the
+  Analysis produced more than one Presentation.
+- **Breaking:** `InkletRequestOptions.headers` is `InkletRequestHeaders` and
+  `.body` is `InkletRequestBody | null`, both exported. The declarations no
+  longer need the DOM lib: a Node project with `lib: ["ES2022"]` and
+  `skipLibCheck: false` failed with TS2304.
+- **Breaking:** Remove `UnsupportedOperationError`, which nothing threw and the
+  package entry point never exported. The `AnalysesResource` constructor takes
+  only its transport.
+- **Breaking:** Require Node.js 22 or newer. Node.js 20 reached end of life in
+  April 2026.
+- **Packaging:** `exports` has separate `import` and `require` conditions, each
+  with its own `types`, so a CommonJS consumer (a `.cts` file under
+  `module: node16`) no longer fails with TS1479. `dist/types/` is gone; the
+  declarations sit next to each build. `./package.json` is exported, and `src/`
+  ships so that source maps resolve.
+- **License:** MIT. Earlier releases were `UNLICENSED`.
+- **Fix:** `analyses.list({ contentId })` and `presentations.list({ displayId })`
+  no longer encode the id twice.
+- **Fix:** A path id of `.` or `..` is refused with `ConfigurationError` before
+  anything is sent, instead of addressing a different route.
+- **Fix:** `AssetUploadError.cause` is the underlying failure of the first Asset
+  that still failed; it used to be dropped.
+- **Fix:** A non-JSON error body, such as a proxy's HTML page, becomes a short
+  message — `The Inklet API returned HTTP 502: …` with the page's `<title>` or
+  at most 200 characters of its text, credentials redacted — instead of the
+  whole page.
+- **Fix:** A bare `event: end` frame with no `data:` line ends `watch()`. It was
+  dropped, which led to reconnects and finally a `NetworkError`.
+- **Fix:** `describeEvent()` no longer reads an inherited property for a
+  rejection `reason` such as `"constructor"`.
+- Fix the `repository`, `homepage`, and `bugs` links, which pointed at the
+  repository's old location.
+
+## 0.2.2 — 2026-09-16 (tagged, never published to npm)
 
 One fix to Presentation rendition parsing. The SDK modelled a rendition as
 always having a URL; the backend has always been able to send one without.
@@ -25,7 +128,7 @@ always having a URL; the backend has always been able to send one without.
   the whole read. Code that read `rendition.url` as a `string` now needs a null
   check; nothing is removed or renamed.
 
-## 0.2.1
+## 0.2.1 — 2026-09-15 (tagged, never published to npm)
 
 Three corrections to the Analysis event stream, found while the Portal built
 its timeline on these types. No API is removed or renamed.
@@ -59,7 +162,7 @@ its timeline on these types. No API is removed or renamed.
   chose": a rejected plan is not a failed run. Nothing branches on these
   strings; `type` and `data` are unchanged.
 
-## 0.2.0
+## 0.2.0 — 2026-09-15 (tagged, never published to npm)
 
 The Analysis event stream is now a public progress report rather than a window
 onto the run. Everything in this release follows from that.
@@ -119,7 +222,8 @@ onto the run. Everything in this release follows from that.
   depth on `presentations.list()`. The Free plan sees the last 7 days of
   Display Presentations and Pro sees all of them; the backend clamps rather
   than refusing, so older rows are omitted from `items` and the RFC3339 UTC
-  floor is disclosed here. It is `null` when nothing was clipped, including a
+  floor is disclosed here whenever one applies, not only when rows were left
+  out. It is `null` when none does: an unlimited plan, or a
   `scope: "generated"` read, which has no Display half. `items`, `nextCursor`,
   and `hasMore` are unchanged, and `displays.listQueue()`,
   `displays.current()`, and `presentations.retrieve()` are unaffected.
@@ -201,7 +305,7 @@ onto the run. Everything in this release follows from that.
   (agent-selected, pinned Displays, or software-only `output`) to Analysis.
 - Add `analyses.wait()`, `analyses.list()`, `no_change` outcomes,
   `AnalysisFailedError`, and `NoChangeError`.
-- Remove `contents.confirm()`; Content state is now `pending | ready | failed`
+- **Breaking:** Remove `contents.confirm()`; Content state is now `pending | ready | failed`
   and only tracks Asset ingestion.
 - `push.*` and `presentations.generate()` are now wrappers over upload plus
   Analysis and accept `context`.

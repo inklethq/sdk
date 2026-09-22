@@ -72,15 +72,13 @@ Only deltas verified against the current code.
   `400`). `agent.activity` reports coalesced agent progress. Render and
   delivery events are written after the Analysis is already terminal, so they
   appear in the paged read but never on the SSE stream.
-- **Retired plumbing.** The SDK-specific SQS queues `inklet-sdk-content` and
-  `inklet-sdk-analysis`, their `SQS_SDK_CONTENT_URL` / `SQS_SDK_ANALYSIS_URL`
-  settings, and the Python worker's `sdk-analysis` mode are all gone. SDK
-  Analyses run in worker-agent.
+- **Retired plumbing.** The SDK-specific asynchronous pipeline is gone. SDK
+  Analyses run on the same execution path as every other Analysis.
 
 > Handoff document for the backend implementation agent.
 >
 > Baseline reviewed on 2026-08-05:
-> [current backend API documentation](https://docs-dev.iminklet.com/api/),
+> the backend API documentation of the time,
 > SDK PRDs, and the current `@inklethq/sdk` implementation draft.
 
 ## 1. Objective
@@ -569,7 +567,7 @@ Response `201`:
   "uploadTickets": [
     {
       "assetIndex": 1,
-      "url": "https://inklet-dev.s3.us-east-1.amazonaws.com",
+      "url": "https://<bucket>.s3.<region>.amazonaws.com",
       "fields": { "key": "...", "Content-Type": "image/jpeg" },
       "expiresAt": "2026-08-05T10:15:00Z"
     }
@@ -797,7 +795,7 @@ The backend implementation is complete only when automated tests cover at least:
 6. Add constrained Manual orchestration.
 7. Reuse and validate the existing server-side Hardcode scaling path.
 8. Add immutable Presentation resource and read-only queue/current-preview endpoints.
-9. Add integration tests and update `docs-dev.iminklet.com`.
+9. Add integration tests and update the backend API documentation.
 
 ## 13. Explicitly out of scope for this implementation
 
