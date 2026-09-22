@@ -8,9 +8,14 @@ import {
 } from "./analyses.js";
 import { type Content, type ContentsResource } from "./contents.js";
 import { ConfigurationError } from "./errors.js";
+import type { CallOptions } from "./resource.js";
 
 interface BasePushInput {
-  /** Reused for both the Content and the Analysis; generated when omitted. */
+  /**
+   * Reused for both the Content and the Analysis; generated when omitted.
+   * Either way, an `InkletError` thrown by the Push carries it as
+   * `idempotencyKey`.
+   */
   idempotencyKey?: string;
   intent?: string;
   title?: string;
@@ -37,7 +42,7 @@ export interface HardcodePushInput {
 export interface PushResult {
   contentId: string;
   analysisId: string;
-  state: AnalysisState;
+  state: AnalysisState | (string & {});
   presentationIds: readonly string[];
   idempotencyKey: string;
   content: Content;
@@ -50,7 +55,16 @@ export type HardcodePushResult = PushResult;
 
 /**
  * Convenience wrappers: upload one Content and immediately analyze it.
- * Equivalent to `contents.upload()` followed by `analyze()` / `direct()`.
+ * Equivalent to `contents.upload()` followed by `analyze()` / `direct()`,
+ * with one idempotency key for both.
+ *
+ * A Push is two requests that each create something, and neither is retried
+ * automatically. When one fails — the upload, or the Analysis after the
+ * upload went through — the error's `idempotencyKey` is the key both used,
+ * generated or not. Calling the same Push again with the same input and
+ * `idempotencyKey: error.idempotencyKey` picks up the Content the first
+ * attempt created, and the Analysis if it was created too, instead of making
+ * new ones. The backend remembers a key for 24 hours.
  */
 export class PushResource {
   readonly #contents: ContentsResource;
@@ -62,22 +76,31 @@ export class PushResource {
   }
 
   /** Inklet chooses one or more compatible Displays. */
-  async auto(input: AutoPushInput): Promise<AutoPushResult> {
+  async auto(input: AutoPushInput, options: CallOptions = {}): Promise<AutoPushResult> {
     requireAssets("Auto", input);
-    return this.#uploadAndAnalyze(input, input.assets, undefined);
+    return this.#uploadAndAnalyze(input, input.assets, undefined, options);
   }
 
   /** Inklet organizes the Assets for exactly one Display. */
-  async manual(input: ManualPushInput): Promise<ManualPushResult> {
+  async manual(
+    input: ManualPushInput,
+    options: CallOptions = {},
+  ): Promise<ManualPushResult> {
     requireAssets("Manual", input);
     requireDisplayId("Manual", input.displayId);
-    return this.#uploadAndAnalyze(input, input.assets, {
-      displayId: input.displayId,
-    });
+    return this.#uploadAndAnalyze(
+      input,
+      input.assets,
+      { displayId: input.displayId },
+      options,
+    );
   }
 
   /** One PNG or JPEG straight to one Display, no AI. */
-  async hardcode(input: HardcodePushInput): Promise<HardcodePushResult> {
+  async hardcode(
+    input: HardcodePushInput,
+    options: CallOptions = {},
+  ): Promise<HardcodePushResult> {
     if (!input || typeof input !== "object") {
       throw new ConfigurationError("Hardcode Push requires an input object.");
     }
@@ -95,15 +118,21 @@ export class PushResource {
 
     // The backend scales the image to the Display's output geometry. Do not
     // reject a Push because its input dimensions differ from the panel.
-    const uploaded = await this.#contents.upload({
-      assets: [input.image],
-      ...(input.idempotencyKey === undefined ? {} : { idempotencyKey: input.idempotencyKey }),
-    });
-    const analysis = await this.#analyses.direct({
-      contentId: uploaded.content.id,
-      target: { displayId: input.displayId.trim() },
-      idempotencyKey: uploaded.idempotencyKey,
-    });
+    const uploaded = await this.#contents.upload(
+      {
+        assets: [input.image],
+        ...(input.idempotencyKey === undefined ? {} : { idempotencyKey: input.idempotencyKey }),
+      },
+      options,
+    );
+    const analysis = await this.#analyses.direct(
+      {
+        contentId: uploaded.content.id,
+        target: { displayId: input.displayId.trim() },
+        idempotencyKey: uploaded.idempotencyKey,
+      },
+      options,
+    );
     return toPushResult(uploaded.content, analysis, uploaded.idempotencyKey);
   }
 
@@ -111,20 +140,27 @@ export class PushResource {
     input: BasePushInput,
     assets: readonly InkletAsset[],
     target: AnalysisTargetInput | undefined,
+    options: CallOptions,
   ): Promise<PushResult> {
-    const uploaded = await this.#contents.upload({
-      title: input.title ?? null,
-      assets,
-      ...(input.idempotencyKey === undefined ? {} : { idempotencyKey: input.idempotencyKey }),
-    });
-    const analysis = await this.#analyses.analyze({
-      contentIds: [uploaded.content.id],
-      context: input.context ?? "submitted",
-      intent: input.intent ?? null,
-      title: input.title ?? null,
-      ...(target === undefined ? {} : { target }),
-      idempotencyKey: uploaded.idempotencyKey,
-    });
+    const uploaded = await this.#contents.upload(
+      {
+        title: input.title ?? null,
+        assets,
+        ...(input.idempotencyKey === undefined ? {} : { idempotencyKey: input.idempotencyKey }),
+      },
+      options,
+    );
+    const analysis = await this.#analyses.analyze(
+      {
+        contentIds: [uploaded.content.id],
+        context: input.context ?? "submitted",
+        intent: input.intent ?? null,
+        title: input.title ?? null,
+        ...(target === undefined ? {} : { target }),
+        idempotencyKey: uploaded.idempotencyKey,
+      },
+      options,
+    );
     return toPushResult(uploaded.content, analysis, uploaded.idempotencyKey);
   }
 }

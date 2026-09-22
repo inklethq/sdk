@@ -1,6 +1,29 @@
 import type { InkletRequestOptions } from "./client.js";
 import { ConfigurationError, InvalidResponseError } from "./errors.js";
 
+/**
+ * Cancellation and a timeout for one SDK call. Every method that talks to
+ * Inklet accepts these, as the last argument or as part of its options
+ * object.
+ */
+export interface CallOptions {
+  /**
+   * Cancels the call, including a request already in flight; the call then
+   * rejects with `OperationAbortedError`. An abort does not undo anything the
+   * backend already accepted.
+   */
+  signal?: AbortSignal;
+  /**
+   * How long each HTTP request the call sends may take, in milliseconds,
+   * before it is cancelled with `RequestTimeoutError`. Overrides the client's
+   * `timeoutMs` for this call. A method that sends several requests applies it
+   * to each of them rather than to the call as a whole — pass an
+   * `AbortSignal.timeout()` as `signal` for an overall limit — and a storage
+   * upload keeps the client's `uploadTimeoutMs`.
+   */
+  timeoutMs?: number;
+}
+
 export type InkletRequest = <T = unknown>(
   path: string,
   options?: InkletRequestOptions,
@@ -16,7 +39,10 @@ export interface PresignedUpload {
   contentId: string | null;
 }
 
-export type InkletUpload = (upload: PresignedUpload) => Promise<void>;
+export type InkletUpload = (
+  upload: PresignedUpload,
+  options?: { signal?: AbortSignal | undefined },
+) => Promise<void>;
 
 /**
  * Authenticated request that resolves with the raw `Response`, for endpoints
@@ -35,12 +61,43 @@ export interface ResourceTransport {
 
 export const SDK_API_PREFIX = "/api/sdk/v1";
 
-export function encodePathSegment(value: string, name: string): string {
+/**
+ * The request options a resource method forwards for its `CallOptions`, with
+ * absent fields left out rather than set to `undefined`.
+ */
+export function callOptions(options: CallOptions | undefined): InkletRequestOptions {
+  const forwarded: InkletRequestOptions = {};
+  if (options?.signal !== undefined) {
+    forwarded.signal = options.signal;
+  }
+  if (options?.timeoutMs !== undefined) {
+    forwarded.timeoutMs = options.timeoutMs;
+  }
+  return forwarded;
+}
+
+/** A caller-supplied id, trimmed. Use `encodePathSegment` to put it in a path. */
+export function requireId(value: string, name: string): string {
   if (typeof value !== "string" || value.trim().length === 0) {
     throw new ConfigurationError(`${name} must be a non-empty string.`);
   }
+  return value.trim();
+}
 
-  return encodeURIComponent(value.trim());
+/**
+ * A caller-supplied id, ready to be one segment of a request path.
+ *
+ * `encodeURIComponent` escapes `/` and `%` but leaves `.` alone, and a URL
+ * resolves a `.` or `..` segment rather than sending it: `retrieve("..")`
+ * would request the collection above the resource instead. Neither is a
+ * valid id, so both are refused before anything is sent.
+ */
+export function encodePathSegment(value: string, name: string): string {
+  const id = requireId(value, name);
+  if (id === "." || id === "..") {
+    throw new ConfigurationError(`${name} cannot be "." or "..".`);
+  }
+  return encodeURIComponent(id);
 }
 
 export function expectRecord(value: unknown): Record<string, unknown> {
@@ -99,6 +156,34 @@ export function expectInteger(
     throw new InvalidResponseError();
   }
   return value;
+}
+
+/**
+ * Read a value from a set the backend owns and may grow: a state, a mode, a
+ * reason. `T` names the values this SDK knows, for autocompletion and for
+ * narrowing; any other non-empty string is passed through as it is, so a
+ * backend that adds a value does not break an SDK that is already installed.
+ * Only a value that is not a string at all, or is empty, is malformed.
+ *
+ * Request-side options are the opposite: what the SDK sends is validated
+ * against the values it knows (`validateEnumOption`), since sending one the
+ * backend does not accept can only fail.
+ */
+export function expectEnum<T extends string>(value: unknown): T | (string & {}) {
+  if (typeof value !== "string" || value.length === 0) {
+    throw new InvalidResponseError();
+  }
+  return value;
+}
+
+/** `expectEnum` for every entry of an array. */
+export function expectEnumArray<T extends string>(
+  value: unknown,
+): (T | (string & {}))[] {
+  if (!Array.isArray(value)) {
+    throw new InvalidResponseError();
+  }
+  return value.map((entry) => expectEnum<T>(entry));
 }
 
 export function nullableString(value: unknown): string | null {

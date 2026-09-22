@@ -1,19 +1,12 @@
 import type { AnalysisMode } from "./analyses.js";
-import {
-  delay,
-  expectEnum,
-  throwIfAborted,
-  validateWaitNumber,
-} from "./contents.js";
-import {
-  ConfigurationError,
-  InvalidResponseError,
-  OperationTimeoutError,
-} from "./errors.js";
+import { validateWaitNumber } from "./contents.js";
+import { ConfigurationError, OperationTimeoutError } from "./errors.js";
+import { pollUntil } from "./polling.js";
 import {
   formatQuery,
   parseContentRefs,
   parsePresentation,
+  parsePresentationMode,
   type Presentation,
   type PresentationContentRef,
   type PresentationImageFormat,
@@ -22,15 +15,21 @@ import {
 import {
   SDK_API_PREFIX,
   appendCursorAndLimit,
+  callOptions,
   encodePathSegment,
   expectBoolean,
+  expectEnum,
+  expectEnumArray,
   expectInteger,
   expectRecord,
   expectString,
   expectStringArray,
+  normalizeTimestamp,
   nullableNumber,
   nullableString,
   parsePage,
+  requireId,
+  type CallOptions,
   type ResourceTransport,
 } from "./resource.js";
 
@@ -40,7 +39,8 @@ export interface DisplayCapabilities {
   orientation: string;
   colorMode: string;
   supportedImageContentTypes: readonly string[];
-  supportedOutputFormats: readonly PresentationImageFormat[];
+  /** Formats added after this SDK shipped arrive as their own strings. */
+  supportedOutputFormats: readonly (PresentationImageFormat | (string & {}))[];
 }
 
 export interface Display {
@@ -70,7 +70,7 @@ export interface DisplayPage {
   hasMore: boolean;
 }
 
-export interface ListDisplaysOptions {
+export interface ListDisplaysOptions extends CallOptions {
   cursor?: string;
   limit?: number;
 }
@@ -81,8 +81,8 @@ export interface DisplayQueueItem {
   /** Same shape and ordering as `Presentation.contentIds`. */
   contentIds: readonly PresentationContentRef[];
   /** Same values as `Presentation.mode` and `Analysis.mode`. */
-  mode: AnalysisMode;
-  state: PresentationState;
+  mode: AnalysisMode | (string & {});
+  state: PresentationState | (string & {});
   createdAt: string;
   updatedAt: string;
 }
@@ -98,7 +98,7 @@ export interface ListDisplayQueueOptions extends ListDisplaysOptions {
   to?: string | Date;
 }
 
-export interface CurrentPresentationOptions {
+export interface CurrentPresentationOptions extends CallOptions {
   format?: PresentationImageFormat;
 }
 
@@ -111,8 +111,12 @@ export interface DisplayAdvanceResult {
 export interface WaitUntilCurrentOptions {
   /** Defaults to 1,000 ms. */
   pollIntervalMs?: number;
-  /** Defaults to 120,000 ms. */
+  /**
+   * The whole wait, reads included: a read still in flight when it runs out
+   * is cancelled. Defaults to 120,000 ms.
+   */
   timeoutMs?: number;
+  /** Cancels the wait, and a read in flight with it. */
   signal?: AbortSignal;
 }
 
@@ -129,14 +133,16 @@ export class DisplaysResource {
     const suffix = query.size === 0 ? "" : `?${query.toString()}`;
     const response = await this.#transport.request(
       `${SDK_API_PREFIX}/displays${suffix}`,
+      callOptions(options),
     );
     return parsePage(response, parseDisplay);
   }
 
-  async retrieve(displayId: string): Promise<Display> {
+  async retrieve(displayId: string, options: CallOptions = {}): Promise<Display> {
     const id = encodePathSegment(displayId, "displayId");
     const response = await this.#transport.request(
       `${SDK_API_PREFIX}/displays/${id}`,
+      callOptions(options),
     );
     return parseDisplay(expectRecord(response));
   }
@@ -167,6 +173,7 @@ export class DisplaysResource {
     const suffix = query.size === 0 ? "" : `?${query.toString()}`;
     const response = await this.#transport.request(
       `${SDK_API_PREFIX}/displays/${id}/queue${suffix}`,
+      callOptions(options),
     );
     return parsePage(response, parseQueueItem);
   }
@@ -179,6 +186,7 @@ export class DisplaysResource {
     const response = expectRecord(
       await this.#transport.request(
         `${SDK_API_PREFIX}/displays/${id}/current-presentation${formatQuery(options.format)}`,
+        callOptions(options),
       ),
     );
     if (response.presentation === null) {
@@ -198,12 +206,17 @@ export class DisplaysResource {
    * back into the queue. The switch lands on `pendingPresentationId`;
    * `currentPresentationId` follows once the panel confirms, which for an
    * offline panel happens at its next sync. Use `waitUntilCurrent()` to wait
-   * for that. Consumes no AI or push quota.
+   * for that. Consumes no AI or push quota. Not retried automatically.
    */
-  async setCurrent(displayId: string, presentationId: string): Promise<Display> {
+  async setCurrent(
+    displayId: string,
+    presentationId: string,
+    options: CallOptions = {},
+  ): Promise<Display> {
     const id = encodePathSegment(displayId, "displayId");
     const response = expectRecord(
       await this.#transport.request(`${SDK_API_PREFIX}/displays/${id}/current`, {
+        ...callOptions(options),
         method: "POST",
         json: { presentationId: requireId(presentationId, "presentationId") },
       }),
@@ -217,11 +230,18 @@ export class DisplaysResource {
    * which is a normal `200` and changes nothing. Otherwise the effect matches
    * `setCurrent()`: the old image expires, the new one lands on
    * `pendingPresentationId`, and no quota is consumed.
+   *
+   * Never retried automatically: a retry after a lost response would skip a
+   * second Presentation.
    */
-  async advance(displayId: string): Promise<DisplayAdvanceResult> {
+  async advance(
+    displayId: string,
+    options: CallOptions = {},
+  ): Promise<DisplayAdvanceResult> {
     const id = encodePathSegment(displayId, "displayId");
     const response = expectRecord(
       await this.#transport.request(`${SDK_API_PREFIX}/displays/${id}/advance`, {
+        ...callOptions(options),
         method: "POST",
       }),
     );
@@ -238,7 +258,9 @@ export class DisplaysResource {
    * confirms when it next syncs.
    *
    * Throws `OperationTimeoutError` on timeout. That does not cancel the
-   * switch: the panel still shows the Presentation once it syncs.
+   * switch: the panel still shows the Presentation once it syncs. Up to three
+   * failed reads in a row — a dropped connection, a timeout, `408`, `429`, or
+   * `5xx` — are retried with backoff before the error is thrown.
    */
   async waitUntilCurrent(
     displayId: string,
@@ -253,45 +275,36 @@ export class DisplaysResource {
     const timeoutMs = validateWaitNumber(
       options.timeoutMs, 120_000, 1, 30 * 60_000, "timeoutMs",
     );
-    const abortMessage = "Waiting for the Display to switch was aborted.";
-    const startedAt = Date.now();
-
-    while (true) {
-      throwIfAborted(options.signal, abortMessage);
-      const display = await this.retrieve(displayId);
-      if (display.currentPresentationId === wanted) {
-        return display;
-      }
-
-      const elapsed = Date.now() - startedAt;
-      if (elapsed >= timeoutMs) {
-        throw new OperationTimeoutError(
-          `Display ${display.id} did not confirm Presentation ${wanted} within ${timeoutMs} ms. The switch is still pending.`,
+    return pollUntil<Display, Display>({
+      signal: options.signal,
+      timeoutMs,
+      pollIntervalMs,
+      abortMessage: "Waiting for the Display to switch was aborted.",
+      read: (signal) => this.retrieve(displayId, { signal }),
+      settle: (display) =>
+        display.currentPresentationId === wanted ? display : undefined,
+      timeout: (display, cause) =>
+        new OperationTimeoutError(
+          `Display ${display?.id ?? displayId.trim()} did not confirm Presentation ${wanted} within ${timeoutMs} ms. The switch is still pending.`,
           {
             details: {
-              displayId: display.id,
+              displayId: display?.id ?? displayId.trim(),
               presentationId: wanted,
-              pendingPresentationId: display.pendingPresentationId,
+              pendingPresentationId: display?.pendingPresentationId ?? null,
               timeoutMs,
             },
+            cause,
           },
-        );
-      }
-      await delay(
-        Math.min(pollIntervalMs, timeoutMs - elapsed),
-        options.signal,
-        abortMessage,
-      );
-    }
+        ),
+    });
   }
 }
 
 export function parseDisplay(record: Record<string, unknown>): Display {
   const capabilities = expectRecord(record.capabilities);
-  const formats = expectStringArray(capabilities.supportedOutputFormats);
-  if (!formats.every(isImageFormat)) {
-    throw new InvalidResponseError();
-  }
+  const formats = expectEnumArray<PresentationImageFormat>(
+    capabilities.supportedOutputFormats,
+  );
   return {
     id: expectString(record, "id"),
     hardwareId: expectString(record, "hardwareId"),
@@ -326,50 +339,13 @@ export function parseDisplay(record: Record<string, unknown>): Display {
 }
 
 function parseQueueItem(record: Record<string, unknown>): DisplayQueueItem {
-  const state = record.state;
-  if (
-    typeof state !== "string" ||
-    ![
-      "preparing",
-      "queued",
-      "published",
-      "confirmed",
-      "expired",
-      "failed",
-    ].includes(state)
-  ) {
-    throw new InvalidResponseError();
-  }
   return {
     id: expectString(record, "id"),
     displayId: expectString(record, "displayId"),
     contentIds: parseContentRefs(record.contentIds),
-    mode: expectEnum(record.mode, ["ai", "direct"] as const),
-    state: state as PresentationState,
+    mode: parsePresentationMode(record.mode),
+    state: expectEnum<PresentationState>(record.state),
     createdAt: expectString(record, "createdAt"),
     updatedAt: expectString(record, "updatedAt"),
   };
-}
-
-function requireId(value: string, name: string): string {
-  if (typeof value !== "string" || value.trim().length === 0) {
-    throw new ConfigurationError(`${name} must be a non-empty string.`);
-  }
-  return value.trim();
-}
-
-function normalizeTimestamp(
-  value: string | Date | undefined,
-  name: "from" | "to",
-): string | undefined {
-  if (value === undefined) return undefined;
-  const date = value instanceof Date ? value : new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    throw new ConfigurationError(`${name} must be a valid date or timestamp.`);
-  }
-  return date.toISOString();
-}
-
-function isImageFormat(value: string): value is PresentationImageFormat {
-  return value === "png" || value === "raw2" || value === "raw4";
 }

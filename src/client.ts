@@ -1,3 +1,4 @@
+import { Deadline, throwIfAborted, validateTimeout } from "./abort.js";
 import {
   ApiError,
   AuthenticationFailedError,
@@ -13,6 +14,7 @@ import {
   PayloadTooLargeError,
   PermissionDeniedError,
   RateLimitError,
+  RequestTimeoutError,
   RevokedSecretKeyError,
   SubscriptionRequiredError,
 } from "./errors.js";
@@ -25,11 +27,23 @@ import {
 import { AssetsResource } from "./assets.js";
 import { ContentsResource } from "./contents.js";
 import { DisplaysResource } from "./displays.js";
+import { parseRetryAfter } from "./polling.js";
 import { PresentationsResource } from "./presentations.js";
 import { PushResource } from "./push.js";
-import type { PresignedUpload, ResourceTransport } from "./resource.js";
+import type {
+  CallOptions,
+  PresignedUpload,
+  ResourceTransport,
+} from "./resource.js";
 
 export const DEFAULT_INKLET_BASE_URL = "https://dev.iminklet.com";
+
+const DEFAULT_TIMEOUT_MS = 60_000;
+const DEFAULT_UPLOAD_TIMEOUT_MS = 5 * 60_000;
+const REQUEST_ABORTED = "The Inklet request was aborted.";
+const UPLOAD_ABORTED = "The Inklet asset upload was aborted.";
+/** How much of a non-JSON error body makes it into `error.message`. */
+const MAX_ERROR_EXCERPT_LENGTH = 200;
 
 type FetchImplementation = (
   input: string | URL | Request,
@@ -57,13 +71,85 @@ export interface InkletClientOptions {
    * Custom fetch implementation, primarily for controlled runtimes and tests.
    */
   fetch?: FetchImplementation;
+
+  /**
+   * How long one API request may take, in milliseconds, before it is
+   * cancelled with `RequestTimeoutError`. Defaults to 60,000.
+   *
+   * The clock runs from sending the request until its response has been read
+   * in full. A streamed response — `requestRaw()`, and the event stream behind
+   * `analyses.watch()` — is only timed until its headers arrive, because its
+   * body is meant to stay open; stop one of those with an `AbortSignal`. Any
+   * resource method can override this for one call with its own `timeoutMs`.
+   * Storage uploads are timed by `uploadTimeoutMs` instead.
+   */
+  timeoutMs?: number;
+
+  /**
+   * How long one binary Asset upload to storage may take, in milliseconds.
+   * Defaults to 300,000 (five minutes).
+   *
+   * An upload goes straight to storage with up to 10 MiB in it, so it gets a
+   * clock of its own rather than the API's: five minutes carries a full-size
+   * Asset at about 280 kbit/s. An upload that runs out of time is a failed
+   * upload like any other — `contents.upload()` refreshes its ticket and tries
+   * once more before giving up with `AssetUploadError` — and a call's
+   * `timeoutMs` does not change it.
+   */
+  uploadTimeoutMs?: number;
 }
+
+/**
+ * Request headers in any form `new Headers()` accepts.
+ *
+ * Declared here rather than borrowed from the DOM's `HeadersInit`, which a
+ * project compiling against `@types/node` without `lib: ["DOM"]` does not
+ * have.
+ */
+export type InkletRequestHeaders =
+  | Headers
+  | Record<string, string | readonly string[]>
+  | readonly (readonly string[])[];
+
+/**
+ * A request body `fetch` can send, declared here for the same reason as
+ * `InkletRequestHeaders`: the DOM's `BodyInit` is not available everywhere
+ * the SDK is compiled. Use `json` rather than a string for a JSON body.
+ */
+export type InkletRequestBody =
+  | string
+  | Blob
+  | ArrayBuffer
+  | ArrayBufferView
+  | FormData
+  | URLSearchParams;
 
 export interface InkletRequestOptions
   extends Omit<RequestInit, "body" | "headers" | "redirect"> {
-  headers?: HeadersInit;
-  body?: BodyInit | null;
+  headers?: InkletRequestHeaders;
+  body?: InkletRequestBody | null;
   json?: unknown;
+  /**
+   * Overrides the client's `timeoutMs` for this request. For `requestRaw()` it
+   * only covers the wait for the response headers.
+   */
+  timeoutMs?: number;
+}
+
+/** A response whose headers have arrived, and the clock still running on it. */
+interface Exchange {
+  response: Response;
+  deadline: Deadline;
+  /**
+   * The error for a failed fetch or body read: a timeout, the caller's abort,
+   * or `NetworkError` with `message` when it was neither.
+   */
+  failure(message: string, context?: FailureContext): InkletError;
+}
+
+interface FailureContext {
+  status?: number | undefined;
+  requestId?: string | undefined;
 }
 
 interface ErrorPayload {
@@ -90,6 +176,8 @@ export class InkletClient {
 
   readonly #secretKey: string;
   readonly #fetch: FetchImplementation;
+  readonly #timeoutMs: number;
+  readonly #uploadTimeoutMs: number;
 
   constructor(options: InkletClientOptions) {
     assertServerEnvironment();
@@ -103,6 +191,14 @@ export class InkletClient {
     this.#secretKey = resolveSecretKey(options);
     this.baseUrl = normalizeBaseUrl(options.baseUrl);
     this.#fetch = resolveFetch(options.fetch);
+    this.#timeoutMs =
+      options.timeoutMs === undefined
+        ? DEFAULT_TIMEOUT_MS
+        : validateTimeout(options.timeoutMs, "timeoutMs");
+    this.#uploadTimeoutMs =
+      options.uploadTimeoutMs === undefined
+        ? DEFAULT_UPLOAD_TIMEOUT_MS
+        : validateTimeout(options.uploadTimeoutMs, "uploadTimeoutMs");
 
     const transport: ResourceTransport = {
       request: this.request.bind(this),
@@ -125,13 +221,13 @@ export class InkletClient {
    * Run the agent over uploaded Contents and/or the user's history.
    * Shorthand for `analyses.analyze()`.
    */
-  analyze(input: AnalyzeInput = {}): Promise<Analysis> {
-    return this.analyses.analyze(input);
+  analyze(input: AnalyzeInput = {}, options: CallOptions = {}): Promise<Analysis> {
+    return this.analyses.analyze(input, options);
   }
 
   /** Show one uploaded image without AI. Shorthand for `analyses.direct()`. */
-  direct(input: DirectInput): Promise<Analysis> {
-    return this.analyses.direct(input);
+  direct(input: DirectInput, options: CallOptions = {}): Promise<Analysis> {
+    return this.analyses.direct(input, options);
   }
 
   /**
@@ -142,14 +238,85 @@ export class InkletClient {
    * ever receives a successful response. Use this for streaming endpoints such
    * as the Analysis event stream, where the body must be consumed
    * incrementally; `request()` is the right choice for everything else.
+   *
+   * The timeout stops once the headers are in, so a body that stays open is
+   * not cut off by it; `signal` still cancels the body for as long as it is
+   * being read.
    */
   async requestRaw(
     path: string,
     options: InkletRequestOptions = {},
   ): Promise<Response> {
+    const { response, deadline } = await this.#send(path, options);
+    deadline.stopTimer();
+    return response;
+  }
+
+  async request<T = unknown>(
+    path: string,
+    options: InkletRequestOptions = {},
+  ): Promise<T> {
+    const { response, deadline, failure } = await this.#send(path, options);
+    try {
+      const requestId = getRequestId(response);
+
+      if (
+        response.status === 204 ||
+        response.status === 205 ||
+        options.method?.toUpperCase() === "HEAD"
+      ) {
+        return undefined as T;
+      }
+
+      let text: string;
+      try {
+        text = await response.text();
+      } catch {
+        throw failure(
+          `The connection to ${new URL(this.baseUrl).origin} closed before the Inklet response was complete.`,
+          { status: response.status, requestId },
+        );
+      }
+      if (text.length === 0) {
+        return undefined as T;
+      }
+
+      if (isJsonResponse(response)) {
+        try {
+          return JSON.parse(text) as T;
+        } catch (cause) {
+          throw new InvalidResponseError({
+            status: response.status,
+            requestId,
+            cause,
+          });
+        }
+      }
+
+      return text as T;
+    } finally {
+      deadline.dispose();
+    }
+  }
+
+  /**
+   * Send one request and wait for its headers. The deadline it returns is
+   * still running: `request()` keeps it until the body is read, and
+   * `requestRaw()` stops it at once.
+   */
+  async #send(path: string, options: InkletRequestOptions): Promise<Exchange> {
     assertServerEnvironment();
     const url = resolveRequestUrl(this.baseUrl, path);
-    const { json, body, headers: suppliedHeaders, ...requestInit } = options;
+    const {
+      json,
+      body,
+      headers: suppliedHeaders,
+      timeoutMs,
+      signal,
+      ...requestInit
+    } = options;
+    const timeout =
+      timeoutMs === undefined ? this.#timeoutMs : validateTimeout(timeoutMs, "timeoutMs");
 
     if (json !== undefined && body !== undefined && body !== null) {
       throw new ConfigurationError(
@@ -157,7 +324,7 @@ export class InkletClient {
       );
     }
 
-    const headers = new Headers(suppliedHeaders);
+    const headers = new Headers(suppliedHeaders as HeadersInit | undefined);
     if (!headers.has("accept")) {
       headers.set("accept", "application/json");
     }
@@ -176,87 +343,73 @@ export class InkletClient {
       }
     }
 
+    const callerSignal = signal ?? undefined;
+    throwIfAborted(callerSignal, REQUEST_ABORTED);
+    const deadline = new Deadline(callerSignal, timeout);
+    const origin = new URL(this.baseUrl).origin;
+    // A failed fetch or body read is our timer, the caller's abort, or the
+    // network, in that order of precedence; `timedOut` is only set when the
+    // timer fired first.
+    const failure: Exchange["failure"] = (message, context = {}) => {
+      if (deadline.timedOut) {
+        return new RequestTimeoutError(
+          `The Inklet request to ${origin} did not complete within ${timeout} ms.`,
+          { ...context, timeoutMs: timeout },
+        );
+      }
+      if (callerSignal?.aborted) {
+        return new OperationAbortedError(REQUEST_ABORTED, {
+          ...context,
+          cause: callerSignal.reason,
+        });
+      }
+      return new NetworkError(message, context);
+    };
+
     const fetchInit: RequestInit = {
       ...requestInit,
       headers,
       redirect: "error",
+      signal: deadline.signal,
     };
     if (requestBody !== undefined) {
-      fetchInit.body = requestBody;
+      fetchInit.body = requestBody as BodyInit | null;
     }
 
     let response: Response;
     try {
       response = await this.#fetch(url, fetchInit);
     } catch (cause) {
+      deadline.dispose();
       if (cause instanceof InkletError) {
         throw cause;
       }
-
-      if (requestInit.signal?.aborted) {
-        throw new OperationAbortedError("The Inklet request was aborted.");
-      }
-
-      throw new NetworkError(
-        `Unable to reach the Inklet service at ${new URL(this.baseUrl).origin}. Check the service address and network connection.`,
+      // The cause is deliberately dropped: a runtime's connection error can
+      // echo request details, credentials included.
+      throw failure(
+        `Unable to reach the Inklet service at ${origin}. Check the service address and network connection.`,
       );
     }
 
     if (!response.ok) {
-      throw await createResponseError(
-        response,
-        getRequestId(response),
-        this.#secretKey,
-      );
-    }
-
-    return response;
-  }
-
-  async request<T = unknown>(
-    path: string,
-    options: InkletRequestOptions = {},
-  ): Promise<T> {
-    const response = await this.requestRaw(path, options);
-    const requestId = getRequestId(response);
-
-    if (
-      response.status === 204 ||
-      response.status === 205 ||
-      options.method?.toUpperCase() === "HEAD"
-    ) {
-      return undefined as T;
-    }
-
-    let text: string;
-    try {
-      text = await response.text();
-    } catch {
-      throw new NetworkError(
-        `The connection to ${new URL(this.baseUrl).origin} closed before the Inklet response was complete.`,
-        { status: response.status, requestId },
-      );
-    }
-    if (text.length === 0) {
-      return undefined as T;
-    }
-
-    if (isJsonResponse(response)) {
       try {
-        return JSON.parse(text) as T;
-      } catch (cause) {
-        throw new InvalidResponseError({
-          status: response.status,
-          requestId,
-          cause,
-        });
+        throw await createResponseError(
+          response,
+          getRequestId(response),
+          this.#secretKey,
+        );
+      } finally {
+        deadline.dispose();
       }
     }
 
-    return text as T;
+    return { response, deadline, failure };
   }
 
-  private async upload(upload: PresignedUpload): Promise<void> {
+  private async upload(
+    upload: PresignedUpload,
+    options: { signal?: AbortSignal | undefined } = {},
+  ): Promise<void> {
     assertServerEnvironment();
     const url = normalizeUploadUrl(upload.url);
     const form = new FormData();
@@ -265,17 +418,32 @@ export class InkletClient {
     }
     form.append("file", upload.blob, upload.filename);
 
+    const { signal } = options;
+    throwIfAborted(signal, UPLOAD_ABORTED);
+    const deadline = new Deadline(signal, this.#uploadTimeoutMs);
     let response: Response;
     try {
       response = await this.#fetch(url, {
         method: "POST",
         body: form,
         redirect: "error",
+        signal: deadline.signal,
       });
     } catch {
+      if (deadline.timedOut) {
+        throw new RequestTimeoutError(
+          `Uploading an Inklet asset did not finish within ${this.#uploadTimeoutMs} ms.`,
+          { timeoutMs: this.#uploadTimeoutMs },
+        );
+      }
+      if (signal?.aborted) {
+        throw new OperationAbortedError(UPLOAD_ABORTED, { cause: signal.reason });
+      }
       throw new NetworkError(
         "Unable to upload an Inklet asset. Check the network connection and retry the Push.",
       );
+    } finally {
+      deadline.dispose();
     }
 
     if (!response.ok) {
@@ -439,7 +607,7 @@ async function createResponseError(
   headerRequestId: string | undefined,
   secretKey: string,
 ): Promise<InkletError> {
-  const payload = await readErrorPayload(response);
+  const payload = await readErrorPayload(response, secretKey);
   const requestId = headerRequestId ?? payload.requestId;
   const serverCode = payload.code?.toLowerCase();
   const options = {
@@ -496,20 +664,26 @@ async function createResponseError(
     });
   }
 
+  const retryAfterMs = parseRetryAfter(response.headers.get("retry-after"));
+
   if (response.status === 429) {
     return new RateLimitError(
       safeMessage || "The Inklet API rate limit was exceeded. Retry later.",
-      { ...options, code: serverCode ?? "rate_limited" },
+      { ...options, code: serverCode ?? "rate_limited", retryAfterMs },
     );
   }
 
   return new ApiError(safeMessage, {
     ...options,
     code: serverCode ?? "api_error",
+    retryAfterMs,
   });
 }
 
-async function readErrorPayload(response: Response): Promise<ErrorPayload> {
+async function readErrorPayload(
+  response: Response,
+  secretKey: string,
+): Promise<ErrorPayload> {
   let text: string;
   try {
     text = await response.text();
@@ -522,7 +696,12 @@ async function readErrorPayload(response: Response): Promise<ErrorPayload> {
   }
 
   if (!isJsonResponse(response)) {
-    return { message: text };
+    // Usually a proxy or gateway page rather than Inklet itself. Its text is
+    // not written for a log line, so only a short plain-text excerpt is kept.
+    const excerpt = excerptBody(redactCredential(text, secretKey));
+    return excerpt
+      ? { message: `The Inklet API returned HTTP ${response.status}: ${excerpt}` }
+      : {};
   }
 
   try {
@@ -570,6 +749,33 @@ function firstString(...values: unknown[]): string | undefined {
 
 function redactCredential(message: string, secretKey: string): string {
   return message.split(secretKey).join("[REDACTED]");
+}
+
+/**
+ * A short, single-line, plain-text excerpt of a response body for an error
+ * message. An HTML page is represented by its `<title>` when it has one —
+ * a gateway's page is mostly styles and scripts, and its title is what says
+ * "502 Bad Gateway" — and otherwise markup and control characters become
+ * spaces, whitespace collapses, and anything past `MAX_ERROR_EXCERPT_LENGTH`
+ * is cut. Credentials must already be redacted: cutting first could leave
+ * half of one behind.
+ */
+function excerptBody(text: string): string {
+  const title = /<title\b[^>]*>([^<]*)<\/title/i.exec(text)?.[1];
+  const plain = (title ?? text)
+    .replace(/<[^>]*>/g, " ")
+    .replace(/[<>]/g, " ")
+    .replace(/[\u0000-\u001f\u007f-\u009f]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (plain.length <= MAX_ERROR_EXCERPT_LENGTH) {
+    return plain;
+  }
+  // Do not end on half of a surrogate pair.
+  const cut = plain
+    .slice(0, MAX_ERROR_EXCERPT_LENGTH)
+    .replace(/[\ud800-\udbff]$/, "");
+  return `${cut.trimEnd()}…`;
 }
 
 function defaultErrorMessage(status: number): string {

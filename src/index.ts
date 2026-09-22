@@ -3,8 +3,12 @@ export {
   Inklet,
   InkletClient,
   type InkletClientOptions,
+  type InkletRequestBody,
+  type InkletRequestHeaders,
   type InkletRequestOptions,
 } from "./client.js";
+
+export { type CallOptions } from "./resource.js";
 
 export {
   ApiError,
@@ -15,6 +19,7 @@ export {
   InkletError,
   InvalidResponseError,
   InvalidSecretKeyError,
+  MultiplePresentationsError,
   NetworkError,
   OperationAbortedError,
   OperationTimeoutError,
@@ -23,6 +28,7 @@ export {
   NotFoundError,
   PermissionDeniedError,
   RateLimitError,
+  RequestTimeoutError,
   RevokedSecretKeyError,
   SubscriptionRequiredError,
   ConflictError,

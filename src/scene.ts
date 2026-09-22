@@ -1,5 +1,6 @@
 import { ConfigurationError, InvalidResponseError } from "./errors.js";
 import {
+  expectEnum,
   expectInteger,
   expectRecord,
   expectRecordArray,
@@ -32,12 +33,15 @@ export interface PresentationOutputRequest {
   colorMode?: PresentationColorMode;
 }
 
-/** The normalized output profile persisted by Inklet. */
+/**
+ * The normalized output profile persisted by Inklet. A format or colour mode
+ * added after this SDK shipped arrives as its own string.
+ */
 export interface PresentationOutput {
-  formats: readonly PresentationOutputFormat[];
+  formats: readonly (PresentationOutputFormat | (string & {}))[];
   preset: string | null;
   viewport: PresentationViewport;
-  colorMode: PresentationColorMode;
+  colorMode: PresentationColorMode | (string & {});
 }
 
 export interface InkletSceneFrame {
@@ -52,11 +56,13 @@ export interface InkletSceneFrame {
  *
  * v1 renderers must support `text`, `image`, and `shape`. Element-specific
  * properties remain available through `properties`, so adding an optional
- * style does not require a new SDK release.
+ * style does not require a new SDK release, and an element type added later
+ * arrives as its own string rather than failing the Presentation it belongs
+ * to — a renderer should skip a type it cannot draw.
  */
 export interface InkletSceneElement {
   id: string;
-  type: "text" | "image" | "shape";
+  type: "text" | "image" | "shape" | (string & {});
   frame: InkletSceneFrame;
   properties: Readonly<Record<string, unknown>>;
 }
@@ -128,27 +134,14 @@ export function parsePresentationOutput(value: unknown): PresentationOutput | nu
     return null;
   }
   const record = expectRecord(value);
-  const formats = record.formats;
-  if (
-    !Array.isArray(formats) ||
-    formats.length === 0 ||
-    !formats.every((format) => format === "scene" || format === "png")
-  ) {
-    throw new InvalidResponseError();
-  }
-  const colorMode = record.colorMode;
-  if (
-    colorMode !== "color" &&
-    colorMode !== "grayscale" &&
-    colorMode !== "monochrome"
-  ) {
+  if (!Array.isArray(record.formats) || record.formats.length === 0) {
     throw new InvalidResponseError();
   }
   return {
-    formats: [...formats] as PresentationOutputFormat[],
+    formats: record.formats.map((format) => expectEnum<PresentationOutputFormat>(format)),
     preset: nullableString(record.preset),
     viewport: parseViewport(expectRecord(record.viewport)),
-    colorMode,
+    colorMode: expectEnum<PresentationColorMode>(record.colorMode),
   };
 }
 
@@ -183,10 +176,7 @@ export function parseInkletScene(record: Record<string, unknown>): InkletScene {
 }
 
 function parseSceneElement(record: Record<string, unknown>): InkletSceneElement {
-  const type = record.type;
-  if (type !== "text" && type !== "image" && type !== "shape") {
-    throw new InvalidResponseError();
-  }
+  const type = expectEnum<"text" | "image" | "shape">(record.type);
   const properties = record.properties;
   if (!isRecord(properties)) {
     throw new InvalidResponseError();

@@ -6,17 +6,21 @@ import {
   type AnalysesResource,
   type WaitForAnalysisOptions,
 } from "./analyses.js";
-import { ContentsResource, expectEnum, parseProblem } from "./contents.js";
+import { ContentsResource, parseProblem } from "./contents.js";
 import {
   ConfigurationError,
   InvalidResponseError,
+  MultiplePresentationsError,
   NoChangeError,
 } from "./errors.js";
+import { readWithRetry } from "./polling.js";
 import { toPushResult, type PushResult } from "./push.js";
 import {
   SDK_API_PREFIX,
   appendCursorAndLimit,
+  callOptions,
   encodePathSegment,
+  expectEnum,
   expectInteger,
   expectRecord,
   expectRecordArray,
@@ -24,6 +28,8 @@ import {
   nullableRecord,
   nullableString,
   parsePage,
+  requireId,
+  type CallOptions,
   type ResourceTransport,
 } from "./resource.js";
 import {
@@ -37,6 +43,11 @@ import {
   type PresentationViewport,
 } from "./scene.js";
 
+/**
+ * The Presentation states this SDK knows, and the ones `list({ state })`
+ * accepts. `Presentation.state` itself is open: a state added to the backend
+ * later arrives as its own string rather than failing the read.
+ */
 export type PresentationState =
   | "preparing"
   | "ready"
@@ -59,7 +70,8 @@ export type PresentationContentRole = "input" | "context";
 /** One Content used by a Presentation, with the role it played. */
 export interface PresentationContentRef {
   id: string;
-  role: PresentationContentRole;
+  /** A role added after this SDK shipped arrives as its own string. */
+  role: PresentationContentRole | (string & {});
 }
 
 export interface PresentationProblem {
@@ -73,7 +85,7 @@ export interface PresentationProblem {
 /** Legacy single-image view retained for Display Presentations. */
 export interface PresentationImage {
   url: string;
-  format: PresentationImageFormat;
+  format: PresentationImageFormat | (string & {});
   width: number;
   height: number;
   expiresAt: string;
@@ -90,13 +102,20 @@ export interface PresentationImage {
  * `failed`: this geometry could not be produced. The rendition stays readable
  * and neither the Scene nor any sibling rendition is affected; asking for the
  * same geometry again returns the same rendition.
+ *
+ * A state added to the backend later is passed through as its own string.
+ * Nothing about it is assumed: `url` still says whether there is a PNG.
  */
 export type PresentationRenditionState = "preparing" | "ready" | "failed";
 
 export interface PresentationRendition {
   id: string;
-  mediaType: "image/png";
-  format: "png";
+  /**
+   * `image/png` for every rendition `render()` creates today. Typed open so
+   * that a format added later does not fail the whole Presentation read.
+   */
+  mediaType: "image/png" | (string & {});
+  format: "png" | (string & {});
   width: number;
   height: number;
   /**
@@ -105,8 +124,8 @@ export interface PresentationRendition {
    * together, so two renditions of one Presentation can differ by nothing
    * else.
    */
-  colorMode: PresentationColorMode;
-  state: PresentationRenditionState;
+  colorMode: PresentationColorMode | (string & {});
+  state: PresentationRenditionState | (string & {});
   /**
    * A short-lived signed link to the PNG, minted per response.
    *
@@ -115,7 +134,7 @@ export interface PresentationRendition {
    * sign, which it reports as a link-less rendition rather than failing the
    * whole read. Always branch on `url`, never on `state` alone. Reading the
    * Presentation again issues a fresh URL for the same stored PNG; it never
-   * re-renders.
+   * re-renders. A `state` this SDK does not know is no exception.
    */
   url: string | null;
   /**
@@ -152,8 +171,8 @@ export interface Presentation {
    * Whether the model produced this Presentation. Same values as
    * `Analysis.mode`; target, context, and trigger live on the Analysis.
    */
-  mode: AnalysisMode;
-  state: PresentationState;
+  mode: AnalysisMode | (string & {});
+  state: PresentationState | (string & {});
   /**
    * What this Presentation is called in a Display's history: the plan's own
    * title, else the template's title parameter, else the first input
@@ -197,12 +216,12 @@ export interface PresentationPage {
   historyWindowStart: string | null;
 }
 
-export interface RetrievePresentationOptions {
+export interface RetrievePresentationOptions extends CallOptions {
   /** Legacy Display image selection. Generated Presentations return all renditions. */
   format?: PresentationImageFormat;
 }
 
-export interface ListPresentationsOptions {
+export interface ListPresentationsOptions extends CallOptions {
   scope?: "generated" | "display" | "all";
   state?: PresentationState;
   /**
@@ -275,9 +294,18 @@ export class PresentationsResource {
 
   /**
    * Upload Content and start a targetless Analysis for it. Equivalent to
-   * `contents.upload()` followed by `analyze({ target: { output } })`.
+   * `contents.upload()` followed by `analyze({ target: { output } })`, with
+   * one idempotency key for both.
+   *
+   * Nothing is retried automatically. If either step fails, the error's
+   * `idempotencyKey` is the key both used — generated when `input` had none —
+   * and calling `generate()` again with the same input and that key reuses
+   * the Content already created rather than uploading a second one.
    */
-  async generate(input: GeneratePresentationInput): Promise<PresentationGeneration> {
+  async generate(
+    input: GeneratePresentationInput,
+    options: CallOptions = {},
+  ): Promise<PresentationGeneration> {
     if (!input || typeof input !== "object") {
       throw new ConfigurationError(
         "Presentation generation requires an input object.",
@@ -299,16 +327,22 @@ export class PresentationsResource {
           "Hardcode Presentation generation requires one PNG or JPEG image.",
         );
       }
-      const uploaded = await this.#contents.upload({
-        title: input.title ?? null,
-        assets: [input.image],
-        ...keyOption,
-      });
-      const analysis = await this.#analyses.direct({
-        contentId: uploaded.content.id,
-        target: { output },
-        idempotencyKey: uploaded.idempotencyKey,
-      });
+      const uploaded = await this.#contents.upload(
+        {
+          title: input.title ?? null,
+          assets: [input.image],
+          ...keyOption,
+        },
+        options,
+      );
+      const analysis = await this.#analyses.direct(
+        {
+          contentId: uploaded.content.id,
+          target: { output },
+          idempotencyKey: uploaded.idempotencyKey,
+        },
+        options,
+      );
       return toPushResult(uploaded.content, analysis, uploaded.idempotencyKey);
     }
 
@@ -322,19 +356,25 @@ export class PresentationsResource {
         "Presentation generation requires at least one Asset.",
       );
     }
-    const uploaded = await this.#contents.upload({
-      title: input.title ?? null,
-      assets: input.assets,
-      ...keyOption,
-    });
-    const analysis = await this.#analyses.analyze({
-      contentIds: [uploaded.content.id],
-      context: input.context ?? "submitted",
-      intent: input.intent ?? null,
-      title: input.title ?? null,
-      target: { output },
-      idempotencyKey: uploaded.idempotencyKey,
-    });
+    const uploaded = await this.#contents.upload(
+      {
+        title: input.title ?? null,
+        assets: input.assets,
+        ...keyOption,
+      },
+      options,
+    );
+    const analysis = await this.#analyses.analyze(
+      {
+        contentIds: [uploaded.content.id],
+        context: input.context ?? "submitted",
+        intent: input.intent ?? null,
+        title: input.title ?? null,
+        target: { output },
+        idempotencyKey: uploaded.idempotencyKey,
+      },
+      options,
+    );
     return toPushResult(uploaded.content, analysis, uploaded.idempotencyKey);
   }
 
@@ -346,6 +386,7 @@ export class PresentationsResource {
     const query = formatQuery(options.format);
     const response = await this.#transport.request(
       `${SDK_API_PREFIX}/presentations/${id}${query}`,
+      callOptions(options),
     );
     return parsePresentation(expectRecord(response));
   }
@@ -368,11 +409,13 @@ export class PresentationsResource {
       query.set("state", options.state);
     }
     if (options.displayId !== undefined) {
-      query.set("displayId", encodePathSegment(options.displayId, "displayId"));
+      // URLSearchParams encodes it; encoding it first would send `%2520`.
+      query.set("displayId", requireId(options.displayId, "displayId"));
     }
     const suffix = query.size === 0 ? "" : `?${query.toString()}`;
     const response = await this.#transport.request(
       `${SDK_API_PREFIX}/presentations${suffix}`,
+      callOptions(options),
     );
     const record = expectRecord(response);
     return {
@@ -395,6 +438,13 @@ export class PresentationsResource {
    * This waits for the Analysis, which settles once the Scene is durable — the
    * pixels can still be rendering. Check `state` on the Presentation, or on the
    * rendition you want, before reaching for a `url`.
+   *
+   * An Analysis that produced several Presentations — one pinned to several
+   * Displays, for instance — throws `MultiplePresentationsError` with their
+   * ids; use `analyses.wait()` for those. `timeoutMs` bounds the wait for the
+   * Analysis; the one read of the Presentation after it is bounded by the
+   * client's request timeout, and is retried through transient failures like
+   * the reads before it.
    */
   async waitUntilReady(
     generationOrAnalysis: PresentationGeneration | Analysis | string,
@@ -411,9 +461,18 @@ export class PresentationsResource {
       throw new NoChangeError(analysis.id, analysis.noChangeReason);
     }
     if (analysis.presentationIds.length !== 1) {
-      throw new InvalidResponseError();
+      throw new MultiplePresentationsError(analysis.id, analysis.presentationIds);
     }
-    return this.retrieve(analysis.presentationIds[0] as string);
+    const presentationId = analysis.presentationIds[0] as string;
+    const signal = options.signal;
+    return readWithRetry(
+      () => this.retrieve(presentationId, signal === undefined ? {} : { signal }),
+      {
+        signal,
+        abortMessage: "Waiting for the Presentation was aborted.",
+        baseDelayMs: options.pollIntervalMs ?? 1_000,
+      },
+    );
   }
 
   /**
@@ -429,13 +488,14 @@ export class PresentationsResource {
   async render(
     presentationId: string,
     input: CreatePresentationRenditionInput,
+    options: CallOptions = {},
   ): Promise<PresentationRendition> {
     const id = encodePathSegment(presentationId, "presentationId");
     const output: PresentationOutputRequest = { ...input, formats: ["png"] };
     validatePresentationOutputRequest(output);
     const response = await this.#transport.request(
       `${SDK_API_PREFIX}/presentations/${id}/renditions`,
-      { method: "POST", json: output },
+      { ...callOptions(options), method: "POST", json: output },
     );
     return parseRendition(expectRecord(response));
   }
@@ -444,10 +504,7 @@ export class PresentationsResource {
 export function parsePresentation(
   record: Record<string, unknown>,
 ): Presentation {
-  const state = expectString(record, "state");
-  if (!isPresentationState(state)) {
-    throw new InvalidResponseError();
-  }
+  const state = expectEnum<PresentationState>(record.state);
   const displayId = nullableString(record.displayId);
   const renditions =
     record.renditions === undefined
@@ -460,7 +517,7 @@ export function parsePresentation(
     displayId,
     analysisId: nullableString(record.analysisId),
     contentIds: parseContentRefs(record.contentIds),
-    mode: expectEnum(record.mode, ["ai", "direct"] as const),
+    mode: parsePresentationMode(record.mode),
     state,
     title: nullableString(record.title),
     output: parsePresentationOutput(record.output),
@@ -473,18 +530,31 @@ export function parsePresentation(
   };
 }
 
+/**
+ * `mode` values a backend from before 0.2 sent. They are past values rather
+ * than future ones: passing one through as an unknown mode would present a
+ * v0.1 Presentation, whose `mode` meant something else, as a current one.
+ */
+const RETIRED_PRESENTATION_MODES: readonly string[] = ["auto", "manual", "hardcode"];
+
+/** A Presentation or queue item `mode`: open, except for the retired values. */
+export function parsePresentationMode(value: unknown): AnalysisMode | (string & {}) {
+  const mode = expectEnum<AnalysisMode>(value);
+  if (RETIRED_PRESENTATION_MODES.includes(mode)) {
+    throw new InvalidResponseError();
+  }
+  return mode;
+}
+
 /** Parses the `[{ id, role }]` shape shared by Presentations and queue items. */
 export function parseContentRefs(value: unknown): PresentationContentRef[] {
   return expectRecordArray(value).map((entry) => ({
     id: expectString(entry, "id"),
-    role: expectEnum(entry.role, ["input", "context"] as const),
+    role: expectEnum<PresentationContentRole>(entry.role),
   }));
 }
 
 function parseRendition(record: Record<string, unknown>): PresentationRendition {
-  if (record.mediaType !== "image/png" || record.format !== "png") {
-    throw new InvalidResponseError();
-  }
   const width = expectInteger(record, "width");
   const height = expectInteger(record, "height");
   if (width <= 0 || height <= 0) {
@@ -497,18 +567,12 @@ function parseRendition(record: Record<string, unknown>): PresentationRendition 
   // thrown one, which is the whole bug this parser used to have.
   return {
     id: expectString(record, "id"),
-    mediaType: "image/png",
-    format: "png",
+    mediaType: expectEnum<"image/png">(record.mediaType),
+    format: expectEnum<"png">(record.format),
     width,
     height,
-    colorMode: expectEnum(
-      record.colorMode,
-      ["color", "grayscale", "monochrome"] as const,
-    ),
-    state: expectEnum(
-      record.state,
-      ["preparing", "ready", "failed"] as const,
-    ),
+    colorMode: expectEnum<PresentationColorMode>(record.colorMode),
+    state: expectEnum<PresentationRenditionState>(record.state),
     url: nullableString(record.url),
     expiresAt: nullableString(record.expiresAt),
     updatedAt: expectString(record, "updatedAt"),
@@ -522,13 +586,9 @@ function parseImage(
   if (record === null) {
     return null;
   }
-  const format = expectString(record, "format");
-  if (format !== "png" && format !== "raw2" && format !== "raw4") {
-    throw new InvalidResponseError();
-  }
   return {
     url: expectString(record, "url"),
-    format,
+    format: expectEnum<PresentationImageFormat>(record.format),
     width: expectInteger(record, "width"),
     height: expectInteger(record, "height"),
     expiresAt: expectString(record, "expiresAt"),
@@ -536,6 +596,7 @@ function parseImage(
   };
 }
 
+/** Request-side check for the `state` filter; responses use `expectEnum`. */
 function isPresentationState(value: unknown): value is PresentationState {
   return (
     typeof value === "string" &&
