@@ -1,8 +1,17 @@
 {
   "name": "@inklethq/sdk",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "description": "Official JavaScript and TypeScript SDK for Inklet.",
-  "license": "UNLICENSED",
+  "keywords": [
+    "inklet",
+    "e-ink",
+    "e-paper",
+    "display",
+    "sdk",
+    "typescript"
+  ],
+  "author": "inklet LLC",
+  "license": "MIT",
   "type": "module",
   "main": "./dist/cjs/index.js",
   "module": "./dist/esm/index.js",
@@ -24,19 +33,20 @@
     "dist",
     "src",
     "README.md",
-    "CHANGELOG.md"
+    "CHANGELOG.md",
+    "LICENSE"
   ],
   "sideEffects": false,
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Inklet-2026/sdk.git"
+    "url": "git+https://github.com/inklethq/sdk.git"
   },
-  "homepage": "https://github.com/Inklet-2026/sdk#readme",
+  "homepage": "https://github.com/inklethq/sdk#readme",
   "bugs": {
-    "url": "https://github.com/Inklet-2026/sdk/issues"
+    "url": "https://github.com/inklethq/sdk/issues"
   },
   "publishConfig": {
     "access": "public",
