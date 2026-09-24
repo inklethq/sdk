@@ -26,6 +26,7 @@ import {
 } from "./analyses.js";
 import { AssetsResource } from "./assets.js";
 import { ContentsResource } from "./contents.js";
+import { ConversationsResource } from "./conversations.js";
 import { DisplaysResource } from "./displays.js";
 import { parseRetryAfter } from "./polling.js";
 import { PresentationsResource } from "./presentations.js";
@@ -170,6 +171,7 @@ export class InkletClient {
   readonly assets: AssetsResource;
   readonly contents: ContentsResource;
   readonly analyses: AnalysesResource;
+  readonly conversations: ConversationsResource;
   readonly displays: DisplaysResource;
   readonly presentations: PresentationsResource;
   readonly push: PushResource;
@@ -208,6 +210,7 @@ export class InkletClient {
     this.assets = new AssetsResource();
     this.contents = new ContentsResource(transport);
     this.analyses = new AnalysesResource(transport);
+    this.conversations = new ConversationsResource(transport);
     this.presentations = new PresentationsResource(
       transport,
       this.contents,

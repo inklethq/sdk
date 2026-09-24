@@ -60,7 +60,11 @@ export type AnalysisEventType =
   | "render.failed"
   | "delivery.published"
   | "delivery.confirmed"
-  | "delivery.failed";
+  | "delivery.failed"
+  | "assistant.delta"
+  | "assistant.citation"
+  | "action.card_created"
+  | "action.display_switched";
 
 /** What the agent is doing right now, as one `agent.activity` reports it. */
 export type AgentActivityKind =
@@ -70,6 +74,10 @@ export type AgentActivityKind =
   | "choosing_layout"
   | "submitting_plan"
   | "retrying"
+  | "searching_notes"
+  | "reading_note"
+  | "creating_card"
+  | "switching_display"
   | "other";
 
 /** `done` and `failed` are final; `active` repeats as the activity runs. */
@@ -85,6 +93,8 @@ export interface AgentActivityStats {
   notesRead?: number;
   /** Distinct layouts looked at. */
   layoutsSeen?: number;
+  /** `searching_notes`: how many notes the search found. */
+  matches?: number;
   /** The layout the agent settled on. */
   chosen?: string | null;
   failedSteps?: number;
@@ -147,6 +157,32 @@ export interface AnalysisCompletedData {
   outcome: AnalysisOutcome | (string & {});
   /** How many Presentations the run produced. */
   presentations: number;
+  /** On a `chat` round (`outcome: "reply"`): the assistant Message that is now final. */
+  messageId?: string;
+}
+
+/** A piece of the reply; concatenate in `seq` order for the full text. */
+export interface AssistantDeltaData {
+  text: string;
+}
+
+/** A Content the reply drew on. */
+export interface AssistantCitationData {
+  contentId: string;
+  title: string;
+}
+
+/** The agent started a card Analysis for the user during a chat round. */
+export interface ActionCardCreatedData {
+  analysisId: string;
+  contentIds?: readonly string[];
+  displayId?: string;
+}
+
+/** The agent put a Presentation back on a Display during a chat round. */
+export interface ActionDisplaySwitchedData {
+  displayId: string;
+  presentationId: string;
 }
 
 export interface AnalysisFailedData {
@@ -256,6 +292,10 @@ export type AnalysisEvent =
   | AnalysisEventOf<"delivery.published", DeliveryEventData>
   | AnalysisEventOf<"delivery.confirmed", DeliveryEventData>
   | AnalysisEventOf<"delivery.failed", DeliveryEventData>
+  | AnalysisEventOf<"assistant.delta", AssistantDeltaData>
+  | AnalysisEventOf<"assistant.citation", AssistantCitationData>
+  | AnalysisEventOf<"action.card_created", ActionCardCreatedData>
+  | AnalysisEventOf<"action.display_switched", ActionDisplaySwitchedData>
   | AnalysisEventOf<string & {}, Record<string, unknown>>;
 
 /** The event of one known type, with its `data` typed. */
@@ -346,6 +386,7 @@ export interface AnalysisArchive {
 const ACTIVITY_STAT_COUNTS = [
   "notesRead",
   "layoutsSeen",
+  "matches",
   "failedSteps",
   "deniedSteps",
 ] as const;
@@ -524,9 +565,24 @@ export function describeEvent(event: AnalysisEvent): string {
     return `Plan accepted · ${count(event.data.presentationIds.length, "Presentation")}`;
   }
   if (isAnalysisEvent(event, "analysis.completed")) {
+    if (event.data.outcome === "reply") {
+      return "Replied";
+    }
     return event.data.outcome === "no_change"
       ? "Finished · nothing worth showing"
       : `Finished · ${count(event.data.presentations, "Presentation")}`;
+  }
+  if (isAnalysisEvent(event, "assistant.citation")) {
+    return event.data.title === "" ? "Cited a note" : `Cited ${event.data.title}`;
+  }
+  if (isAnalysisEvent(event, "action.card_created")) {
+    const from = event.data.contentIds?.length
+      ? ` from ${count(event.data.contentIds.length, "note")}`
+      : "";
+    return `Started a card${from}`;
+  }
+  if (isAnalysisEvent(event, "action.display_switched")) {
+    return `Put ${event.data.presentationId} back on the display`;
   }
   if (isAnalysisEvent(event, "analysis.failed")) {
     return `Failed · ${event.data.code}`;
@@ -627,6 +683,19 @@ function activityLine(data: AgentActivityData): string {
       return done ? "Submitted the plan" : "Checking the plan";
     case "retrying":
       return done ? "Tried another layout" : "Trying another layout";
+    case "searching_notes":
+      if (done) {
+        return stats.matches === undefined
+          ? "Searched your notes"
+          : `Found ${count(stats.matches, "note")}`;
+      }
+      return "Searching your notes";
+    case "reading_note":
+      return done ? "Read a note" : "Reading a note";
+    case "creating_card":
+      return done ? "Started a card" : "Starting a card";
+    case "switching_display":
+      return done ? "Switched the display" : "Switching the display";
     default:
       if (steps <= 0) {
         return done ? "Worked through it" : "Working";
@@ -1097,6 +1166,30 @@ function parseEventData(type: string, value: unknown): Record<string, unknown> {
         ...data,
         outcome: expectEnum<AnalysisOutcome>(data.outcome),
         presentations: expectSequence(data, "presentations"),
+        ...optionalField("messageId", optionalString(data.messageId)),
+      };
+    case "assistant.delta":
+      return { ...data, text: expectString(data, "text") };
+    case "assistant.citation":
+      return {
+        ...data,
+        contentId: expectString(data, "contentId"),
+        title: typeof data.title === "string" ? data.title : "",
+      };
+    case "action.card_created":
+      return {
+        ...data,
+        analysisId: expectString(data, "analysisId"),
+        ...(Array.isArray(data.contentIds)
+          ? { contentIds: expectStringArray(data.contentIds) }
+          : {}),
+        ...optionalField("displayId", optionalString(data.displayId)),
+      };
+    case "action.display_switched":
+      return {
+        ...data,
+        displayId: expectString(data, "displayId"),
+        presentationId: expectString(data, "presentationId"),
       };
     case "analysis.lease_expired":
       return { ...data, attempt: expectSequence(data, "attempt") };

@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased
+
+- Add `conversations`, the Ask inklet resource (`CONVERSATION_CONTRACT.md`):
+  `create`, `list`, `retrieve` (a Conversation with its last 50 Messages),
+  `listMessages({ before })`, `delete`, `send` (one user message, one round;
+  needs an idempotency key, made for you when absent), `message`, and
+  `reply`, which sends and then follows the round's Analysis until the
+  assistant Message settles, handing each `assistant.delta` to `onDelta` and
+  every event to `onEvent`. A failed round rejects with `AnalysisFailedError`
+  carrying `conversationId` and `messageId`.
+- `Analysis.mode` gains `chat` and `outcome` gains `reply`; `trigger` gains
+  `chat` for cards the agent starts during a round. `analyses.list()` leaves
+  chat rounds out unless asked with `{ mode: "chat" }`, and takes `mode`
+  alongside `state` and `trigger`.
+- Four event types: `assistant.delta` (`text`), `assistant.citation`
+  (`contentId`, `title`), `action.card_created` (`analysisId`, `contentIds?`,
+  `displayId?`), `action.display_switched` (`displayId`, `presentationId`).
+  `analysis.completed` carries `messageId` on a chat round. `agent.activity`
+  gains the kinds `searching_notes` (with `stats.matches`), `reading_note`,
+  `creating_card`, `switching_display`; `describeEvent()` knows all of them.
+- `MAX_MESSAGE_LENGTH` (4000): `send` and `reply` trim the text and refuse a
+  blank or longer one with `ConfigurationError` before any request.
+
 ## 0.3.1
 
 - Add `contents.list({ q })`, the knowledge search: whitespace-separated
