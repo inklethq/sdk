@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.1
 
 - Add `contents.list({ q })`, the knowledge search: whitespace-separated
   terms that must all appear on the same Content — its title, or an Asset's
