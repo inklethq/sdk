@@ -213,6 +213,18 @@ Message。`409 attempt_superseded` 同 plan。
 三条 `POST` 都要求 `X-Internal-Token` + run token，且 run token 的 `mode` 必须是
 `chat`（在 claims 里新增 `mode`）。
 
+两个动作接口还要求 **`Idempotency-Key`**（缺失 `400`）。它们有持久的副作用，而 worker
+会在传输失败 / 5xx 上重试，SQS 也可能把整条消息重投；没有 key，一次「后端已提交但
+响应丢了」就是两张卡、两次扣额度。
+
+- worker 侧的 key 由「本轮 analysisId + 动作种类 + 动作的实质参数」算出，**不含
+  tool call id**：`chat-<analysisId>-<sha256(kind + 规范化参数)[:32]>`。规范化 =
+  键排序、`contentIds` 排序、不含 `intent` / `title`。于是 HTTP 重试、SQS 重投、
+  模型在新一次尝试里再做同一件事，都是同一个 key。
+- 后端把 key 的作用域定为「用户 + 路由 + 本轮 analysisId」，与公开接口共用一套
+  幂等存储：同 key 同 body 回放第一次的响应（不再创建、不扣额度、不记事件）；
+  同 key 不同 body → `409 idempotency_conflict`；同 key 仍在处理 → `409`。
+
 ## 8. 权益与计量
 
 - 新增 `ai_chat`，最低 Pro，无试用。
