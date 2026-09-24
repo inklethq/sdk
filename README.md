@@ -620,6 +620,11 @@ references the Content.
 const { content } = await inklet.contents.upload({ assets });
 await inklet.contents.waitUntilReady(content);   // optional
 const stored = await inklet.contents.list({ state: "ready" });
+
+// Search the library: every term must appear on the same Content — its title,
+// or an Asset's text, link, filename, or what Inklet read out of an image or
+// file. Substring match, so CJK works; paging is the same as an unfiltered list.
+const found = await inklet.contents.list({ q: "dentist thursday" });
 ```
 
 `contents.create()` and `contents.refreshUploadTickets()` remain public for

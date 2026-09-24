@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Add `contents.list({ q })`, the knowledge search: whitespace-separated
+  terms that must all appear on the same Content — its title, or an Asset's
+  text, URL, filename, digest summary, digest text, or tag. Case-insensitive
+  substring match, so CJK text matches without tokenisation. The SDK trims
+  it, sends nothing for a blank value, and rejects more than 200 characters
+  (`MAX_CONTENT_SEARCH_LENGTH`) with `ConfigurationError` before a request.
+  Paging and ordering are those of the unfiltered list.
+
 ## 0.3.0
 
 The first release on npm since 0.1.0. 0.2.0, 0.2.1, and 0.2.2 were tagged but
