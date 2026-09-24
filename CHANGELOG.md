@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.0
 
 - Add `conversations`, the Ask inklet resource (`CONVERSATION_CONTRACT.md`):
   `create`, `list`, `retrieve` (a Conversation with its last 50 Messages),
