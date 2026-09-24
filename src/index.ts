@@ -96,9 +96,35 @@ export {
 } from "./analyses.js";
 
 export {
+  ConversationsResource,
+  MAX_MESSAGE_LENGTH,
+  type Conversation,
+  type ConversationDetail,
+  type ConversationMessage,
+  type ConversationMessageRole,
+  type ConversationMessageState,
+  type ConversationPage,
+  type CreateConversationInput,
+  type ListConversationsOptions,
+  type ListMessagesOptions,
+  type MessageAction,
+  type MessageActionKind,
+  type MessageCitation,
+  type MessagePage,
+  type ReplyOptions,
+  type ReplyResult,
+  type SendMessageInput,
+  type SendMessageResult,
+} from "./conversations.js";
+
+export {
   describeEvent,
   isAnalysisEvent,
   mergeActivities,
+  type ActionCardCreatedData,
+  type ActionDisplaySwitchedData,
+  type AssistantCitationData,
+  type AssistantDeltaData,
   type AgentActivityData,
   type AgentActivityKind,
   type AgentActivityState,

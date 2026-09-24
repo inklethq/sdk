@@ -110,6 +110,20 @@ void client.contents.create({ assets: [{ type: "text", text: "Hi" }] }, "key-123
 void client.contents.refreshUploadTickets("content_123", [0], call);
 void client.analyses.retrieve("analysis_123", call);
 void client.analyses.list({ state: "running", ...call });
+void client.analyses.list({ mode: "chat", trigger: "chat", ...call });
+void client.conversations.create({ title: "牙医" }, call);
+void client.conversations.list({ limit: 10, ...call });
+void client.conversations.retrieve("conversation_123", call);
+void client.conversations.listMessages("conversation_123", { before: "message_123", ...call });
+void client.conversations.delete("conversation_123", call);
+void client.conversations.send("conversation_123", { text: "你好" }, call);
+void client.conversations.send("conversation_123", "你好", call);
+void client.conversations.reply("conversation_123", "你好", {
+  onDelta: (text: string) => void text,
+  onEvent: (ev: AnalysisEvent) => void ev.seq,
+  ...call,
+});
+void client.conversations.message("conversation_123", "message_123", call);
 void client.analyses.archive("analysis_123", call);
 void client.analyses.listEvents("analysis_123", { after: 1, ...call });
 void client.displays.list(call);
@@ -128,6 +142,8 @@ void client.direct({ contentId: "content_123", target: { displayId: "d" } }, cal
 // only fail.
 // @ts-expect-error not a Content state this SDK can ask for
 void client.contents.list({ state: "archived" });
+// @ts-expect-error chat rounds are started through conversations, not analyses.create
+void client.analyses.create({ mode: "chat", contentIds: [] }, "key-12345678");
 // @ts-expect-error not a Presentation state this SDK can ask for
 void client.presentations.list({ state: "archived" });
 

@@ -55,10 +55,13 @@ import {
  * (`AnalysisState | (string & {})`), so a value the backend adds later is
  * passed through as a string rather than failing the read.
  */
-export type AnalysisMode = "ai" | "direct";
-export type AnalysisTrigger = "api" | "scheduled";
+/** `chat` is an Ask inklet round; the default `list()` leaves those out. */
+export type AnalysisMode = "ai" | "direct" | "chat";
+/** `chat`: created by the agent during an Ask inklet round. */
+export type AnalysisTrigger = "api" | "scheduled" | "chat";
 export type AnalysisState = "queued" | "running" | "completed" | "failed";
-export type AnalysisOutcome = "presentations" | "no_change";
+/** `reply` is the outcome of a `chat` Analysis: an assistant Message, no Presentation. */
+export type AnalysisOutcome = "presentations" | "no_change" | "reply";
 
 /**
  * `submitted`: the agent only sees the listed Contents.
@@ -158,7 +161,8 @@ export interface DirectInput {
 
 /** Low-level request with `mode` explicit; `analyze()` and `direct()` wrap it. */
 export interface CreateAnalysisRequest extends Omit<AnalyzeInput, "idempotencyKey"> {
-  mode: AnalysisMode;
+  /** Only `ai` and `direct` can be created here; `chat` rounds come from `conversations`. */
+  mode: Exclude<AnalysisMode, "chat">;
 }
 
 export interface ListAnalysesOptions extends CallOptions {
@@ -166,6 +170,8 @@ export interface ListAnalysesOptions extends CallOptions {
   contentId?: string;
   state?: AnalysisState;
   trigger?: AnalysisTrigger;
+  /** Unset, the list holds `ai` and `direct` Analyses and leaves `chat` out. */
+  mode?: AnalysisMode;
   cursor?: string;
   limit?: number;
 }
@@ -294,6 +300,10 @@ export class AnalysesResource {
     if (options.trigger !== undefined) {
       validateEnumOption(options.trigger, ["api", "scheduled"], "trigger");
       query.set("trigger", options.trigger);
+    }
+    if (options.mode !== undefined) {
+      validateEnumOption(options.mode, ["ai", "direct", "chat"], "mode");
+      query.set("mode", options.mode);
     }
     const suffix = query.size === 0 ? "" : `?${query.toString()}`;
     const response = await this.#transport.request(

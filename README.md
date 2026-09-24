@@ -321,7 +321,7 @@ for await (const ev of inklet.analyses.watch(analysis.id)) {
 ```
 
 The stream is a progress report, not the run's log. It answers *where is this
-now*, and it is a closed set of sixteen types:
+now*, and it is a closed set of twenty types:
 
 | Stage | Types |
 | --- | --- |
@@ -330,6 +330,7 @@ now*, and it is a closed set of sixteen types:
 | Planning | `plan.submitted` · `plan.rejected` · `plan.accepted` |
 | Result | `render.finished` · `render.failed` · `delivery.published` · `delivery.confirmed` · `delivery.failed` |
 | Finished | `analysis.completed` · `analysis.failed` |
+| Ask inklet | `assistant.delta` · `assistant.citation` · `action.card_created` · `action.display_switched` |
 
 The Result row lands *after* the Analysis is already terminal: the run ends
 when the plan is accepted, and only then do the Presentations render and a
@@ -377,10 +378,11 @@ for await (const ev of inklet.analyses.watch(analysis.id, { after: lastSeq, sign
 A run of related agent steps arrives as one activity rather than one event per
 step: `{ activityId, kind, state, steps, stats }`, where `kind` is
 `reading_brief`, `reading_notes`, `checking_display`, `choosing_layout`,
-`submitting_plan`, `retrying`, or `other`, and `state` is `active`, `done`, or
-`failed`. `stats` counts only what applies — `notesRead`, `layoutsSeen`,
-`chosen`, `failedSteps`, `deniedSteps` — and omits the rest rather than
-sending zeros.
+`submitting_plan`, `retrying`, `searching_notes`, `reading_note`,
+`creating_card`, `switching_display`, or `other`, and `state` is `active`,
+`done`, or `failed`. `stats` counts only what applies — `notesRead`,
+`layoutsSeen`, `matches`, `chosen`, `failedSteps`, `deniedSteps` — and omits
+the rest rather than sending zeros.
 
 The same `activityId` arrives several times as the activity runs: throttled
 `active` updates, then a final `done` or `failed`. **Upsert by `attempt` and
@@ -478,6 +480,43 @@ const reader = response.body!.getReader();
 const decoder = new TextDecoder();
 // Buffer partial lines: chunk boundaries fall anywhere, including mid-line.
 ```
+
+## Ask inklet
+
+A Conversation is a chat with the knowledge base. Every message you send starts
+one round: the agent searches and reads the user's notes, answers, and — only
+when asked to — starts a card or puts an earlier Presentation back on a
+Display. `reply()` sends the message and follows the round until the answer is
+final:
+
+```ts
+const conversation = await inklet.conversations.create();
+
+const { answer } = await inklet.conversations.reply(
+  conversation.id,
+  "When is my next dentist appointment?",
+  { onDelta: (text) => process.stdout.write(text) },
+);
+
+console.log(answer.citations); // the notes it drew on
+console.log(answer.actions);   // what it did on the user's behalf, if anything
+```
+
+Behind each assistant Message is an Analysis with `mode: "chat"`, and the
+round is its event stream: `assistant.delta` carries the text as it is written,
+`assistant.citation` a note the answer used, `action.card_created` and
+`action.display_switched` what the agent did, and `analysis.completed` with
+`outcome: "reply"` marks the Message final. `send()` returns the reply's
+`analysisId` at once if you would rather follow it with `analyses.watch()`
+yourself — a Portal relaying deltas to a browser does exactly that.
+
+`retrieve()` returns a Conversation with its most recent fifty Messages, oldest
+first; `listMessages({ before })` pages further back. Chat rounds stay out of
+`analyses.list()` unless you ask with `{ mode: "chat" }`, so a history of cards
+does not fill up with questions. Asking needs the `ai_chat` capability (Pro);
+without it `send()` rejects with `SubscriptionRequiredError`, and while the
+previous round is still running it rejects with `ConflictError`
+(`reply_in_progress`).
 
 ## Switch the image on a Display
 
