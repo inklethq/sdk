@@ -95,9 +95,22 @@ export interface ContentPage {
 
 export interface ListContentsOptions extends CallOptions {
   state?: ContentState;
+  /**
+   * Knowledge search. Whitespace-separated terms that must all appear on the
+   * same Content: its title, or an Asset's text, URL, filename, digest
+   * summary, digest text, or a digest tag. Case-insensitive substring match,
+   * so CJK text matches without tokenisation; `%` and `_` are literal. The
+   * SDK trims it and sends nothing for a blank value; longer than 200
+   * characters is rejected before a request is made. Ordering and paging are
+   * those of the unfiltered list, so `cursor` pages a search the same way.
+   */
+  q?: string;
   cursor?: string;
   limit?: number;
 }
+
+/** The backend's bound on `ListContentsOptions.q`, in characters. */
+export const MAX_CONTENT_SEARCH_LENGTH = 200;
 
 export interface UploadTicket {
   assetIndex: number;
@@ -285,6 +298,18 @@ export class ContentsResource {
     if (options.state !== undefined) {
       validateEnumOption(options.state, ["pending", "ready", "failed"], "state");
       query.set("state", options.state);
+    }
+    if (options.q !== undefined) {
+      if (typeof options.q !== "string") {
+        throw new ConfigurationError("q must be a string.");
+      }
+      const q = options.q.trim();
+      if ([...q].length > MAX_CONTENT_SEARCH_LENGTH) {
+        throw new ConfigurationError(
+          `q must be at most ${MAX_CONTENT_SEARCH_LENGTH} characters.`,
+        );
+      }
+      if (q.length > 0) query.set("q", q);
     }
     const suffix = query.size === 0 ? "" : `?${query.toString()}`;
     const response = await this.#transport.request(

@@ -55,6 +55,7 @@ export {
 
 export {
   ContentsResource,
+  MAX_CONTENT_SEARCH_LENGTH,
   type Content,
   type ContentAsset,
   type ContentAssetUploadState,

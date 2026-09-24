@@ -695,6 +695,35 @@ describe("SDK v1 Content upload", () => {
   });
 });
 
+describe("SDK v1 Content search", () => {
+  it("sends a trimmed q, omits a blank one, and refuses one over 200 characters", async () => {
+    const urls = [];
+    const client = new Inklet({
+      pat: PAT,
+      fetch: async (input) => {
+        urls.push(new URL(input));
+        return json({ items: [], nextCursor: null, hasMore: false });
+      },
+    });
+
+    await client.contents.list({ q: "  牙医 dentist  ", limit: 20 });
+    await client.contents.list({ q: "   " });
+    await client.contents.list({ state: "ready", q: "12%", cursor: "abc" });
+    await assert.rejects(
+      client.contents.list({ q: "字".repeat(201) }),
+      ConfigurationError,
+    );
+
+    assert.equal(urls.length, 3);
+    assert.equal(urls[0].searchParams.get("q"), "牙医 dentist");
+    assert.equal(urls[0].searchParams.get("limit"), "20");
+    assert.equal(urls[1].searchParams.has("q"), false);
+    assert.equal(urls[2].searchParams.get("q"), "12%");
+    assert.equal(urls[2].searchParams.get("state"), "ready");
+    assert.equal(urls[2].searchParams.get("cursor"), "abc");
+  });
+});
+
 describe("SDK v1 Analysis", () => {
   it("analyzes uploaded Contents with submitted context by default", async () => {
     let body;
