@@ -1,6 +1,6 @@
 # `@inklethq/sdk`
 
-Official server-side JavaScript and TypeScript SDK for Inklet.
+Official server-side JavaScript and TypeScript SDK for inklet.
 
 The SDK supports PAT authentication, Display and Presentation reads, Content
 upload, Analysis (with or without the user's earlier uploads as context), and
@@ -10,15 +10,15 @@ Targetless Presentation generation is available for software-only experiences:
 it produces versioned Scene JSON and PNG renditions without requiring a
 registered Display.
 
-Auto and Manual Push use Inklet AI processing and require an active Pro
+Auto and Manual Push use inklet AI processing and require an active Pro
 subscription. Hardcode Push does not use AI and remains available on the Free
 plan. Subscription checkout and management stay in the
-[Inklet portal](https://portal.iminklet.com/subscription), not in this SDK.
+[inklet portal](https://portal.iminklet.com/subscription), not in this SDK.
 
 ## Requirements
 
 - Node.js 22 or newer
-- An Inklet personal access token (PAT)
+- An inklet personal access token (PAT)
 - A trusted server environment
 
 Never expose a PAT in a browser bundle. The SDK rejects browser use before a
@@ -52,7 +52,7 @@ const inklet = new Inklet({ pat: process.env.INKLET_PAT });
 both options. Client construction validates configuration without making a
 network request.
 
-The default service address is `https://dev.iminklet.com`, the hosted Inklet
+The default service address is `https://dev.iminklet.com`, the hosted inklet
 API. A controlled local or test service can be selected with `baseUrl`.
 
 ### Timeouts and cancellation
@@ -197,7 +197,7 @@ const { content } = await inklet.contents.upload({
   assets: [inklet.assets.text("Dentist at 9am tomorrow")],
 });
 
-// 2. Analyze it. Inklet picks compatible Displays.
+// 2. Analyze it. inklet picks compatible Displays.
 const analysis = await inklet.analyze({
   contentIds: [content.id],
   intent: "Make a reminder card",
@@ -240,7 +240,7 @@ const { content: img } = await inklet.contents.upload({ assets: [inklet.assets.i
 await inklet.direct({ contentId: img.id, target: { displayIds: [displayId] } });
 ```
 
-Omitting `target` asks Inklet to pick the Displays, so it needs at least one
+Omitting `target` asks inklet to pick the Displays, so it needs at least one
 usable one. An account with none is refused at creation — HTTP 422,
 `code: "no_compatible_display"` — instead of running a full pass and failing
 at the end with a message about the Content. A `{ output }` target is
@@ -263,7 +263,7 @@ const done = await inklet.analyses.wait(analysis, { timeoutMs: 15 * 60_000 });
 A timeout throws `OperationTimeoutError` but does not cancel the Analysis;
 `inklet.analyses.retrieve(analysis.id)` still returns it once it finishes.
 
-Scheduled analyses created by Inklet appear in
+Scheduled analyses created by inklet appear in
 `inklet.analyses.list({ trigger: "scheduled" })`.
 
 ### Idempotency
@@ -628,10 +628,10 @@ on the generated half.
 
 `inklet.push.*` are one-call wrappers over `contents.upload()` followed by
 `analyze()` or `direct()`. Binary assets are uploaded directly to temporary
-storage URLs; the PAT is sent only to Inklet API endpoints.
+storage URLs; the PAT is sent only to inklet API endpoints.
 
 ```ts
-// Auto: Inklet chooses compatible Displays.
+// Auto: inklet chooses compatible Displays.
 await inklet.push.auto({
   intent: "Make the key update easy to scan",
   context: "history",           // optional; default "submitted"
@@ -651,7 +651,7 @@ used for both — pass your own `idempotencyKey` for caller-controlled retries.
 ## Content lifecycle
 
 A Content is `ready` once its Assets are in storage. Text and link Contents are
-`ready` immediately; Contents with binary Assets are `pending` until Inklet
+`ready` immediately; Contents with binary Assets are `pending` until inklet
 has verified the uploads, which happens on its own or when an Analysis first
 references the Content.
 
@@ -661,7 +661,7 @@ await inklet.contents.waitUntilReady(content);   // optional
 const stored = await inklet.contents.list({ state: "ready" });
 
 // Search the library: every term must appear on the same Content — its title,
-// or an Asset's text, link, filename, or what Inklet read out of an image or
+// or an Asset's text, link, filename, or what inklet read out of an image or
 // file. Substring match, so CJK works; paging is the same as an unfiltered list.
 const found = await inklet.contents.list({ q: "dentist thursday" });
 ```
@@ -691,7 +691,7 @@ try {
     error instanceof PermissionDeniedError &&
     error.code === "plan_upgrade_required"
   ) {
-    // Upgrade in the Inklet portal, then retry with the same PAT.
+    // Upgrade in the inklet portal, then retry with the same PAT.
   } else if (error instanceof RateLimitError) {
     // Back off, or wait for details.resetAt when an allowance is spent.
   } else if (error instanceof InkletError) {

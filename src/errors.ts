@@ -10,7 +10,7 @@ export interface InkletErrorOptions {
 /**
  * Base class for every error produced by the SDK.
  *
- * `requestId` can be passed to Inklet support without exposing credentials.
+ * `requestId` can be passed to inklet support without exposing credentials.
  */
 export class InkletError extends Error {
   readonly code: string;
@@ -82,7 +82,7 @@ export class ConfigurationError extends InkletError {
 export class BrowserEnvironmentError extends InkletError {
   constructor() {
     super(
-      "Inklet personal access tokens can only be used in trusted server environments. Move this request to a server, serverless function, or controlled local service.",
+      "inklet personal access tokens can only be used in trusted server environments. Move this request to a server, serverless function, or controlled local service.",
       { code: "browser_environment" },
     );
   }
@@ -93,7 +93,7 @@ export class AuthenticationError extends InkletError {}
 export class AuthenticationFailedError extends AuthenticationError {
   constructor(options: Omit<InkletErrorOptions, "code"> = {}) {
     super(
-      "Inklet authentication failed. Check that the personal access token is valid and active.",
+      "inklet authentication failed. Check that the personal access token is valid and active.",
       { ...options, code: "authentication_failed" },
     );
   }
@@ -102,7 +102,7 @@ export class AuthenticationFailedError extends AuthenticationError {
 export class InvalidSecretKeyError extends AuthenticationError {
   constructor(options: Omit<InkletErrorOptions, "code"> = {}) {
     super(
-      "Inklet authentication failed. Check that the personal access token is valid and active.",
+      "inklet authentication failed. Check that the personal access token is valid and active.",
       { ...options, code: "invalid_secret_key" },
     );
   }
@@ -111,7 +111,7 @@ export class InvalidSecretKeyError extends AuthenticationError {
 export class RevokedSecretKeyError extends AuthenticationError {
   constructor(options: Omit<InkletErrorOptions, "code"> = {}) {
     super(
-      "The Inklet personal access token has been revoked. Create a new token and update the server configuration.",
+      "The inklet personal access token has been revoked. Create a new token and update the server configuration.",
       { ...options, code: "revoked_secret_key" },
     );
   }
@@ -128,12 +128,12 @@ export class PermissionDeniedError extends InkletError {
 
 /**
  * The authenticated user does not have the subscription required by a
- * server-side feature. Subscription changes are managed in the Inklet portal;
+ * server-side feature. Subscription changes are managed in the inklet portal;
  * retrying the same request before the plan changes will not help.
  */
 export class SubscriptionRequiredError extends PermissionDeniedError {
   constructor(
-    message = "This Inklet feature requires an active Pro subscription. Manage the subscription in the Inklet portal, then retry with the same personal access token.",
+    message = "This inklet feature requires an active Pro subscription. Manage the subscription in the inklet portal, then retry with the same personal access token.",
     options: Omit<InkletErrorOptions, "code"> = {},
   ) {
     super(message, { ...options, code: "subscription_required" });
@@ -243,7 +243,7 @@ export class ApiError extends InkletError {
 
 export class InvalidResponseError extends InkletError {
   constructor(options: Omit<InkletErrorOptions, "code"> = {}) {
-    super("Inklet returned a response that the SDK could not parse.", {
+    super("inklet returned a response that the SDK could not parse.", {
       ...options,
       code: "invalid_response",
     });
@@ -252,7 +252,7 @@ export class InvalidResponseError extends InkletError {
 
 /**
  * The request did not produce a response: the connection failed, dropped, or
- * timed out. The request may or may not have reached Inklet, so a call that
+ * timed out. The request may or may not have reached inklet, so a call that
  * creates something is only safe to retry with the same idempotency key.
  */
 export class NetworkError extends InkletError {

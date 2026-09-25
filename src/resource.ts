@@ -3,7 +3,7 @@ import { ConfigurationError, InvalidResponseError } from "./errors.js";
 
 /**
  * Cancellation and a timeout for one SDK call. Every method that talks to
- * Inklet accepts these, as the last argument or as part of its options
+ * inklet accepts these, as the last argument or as part of its options
  * object.
  */
 export interface CallOptions {

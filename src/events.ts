@@ -31,7 +31,7 @@ import type { AnalysisOutcome, AnalysisState } from "./analyses.js";
 
 export type AnalysisEventLevel = "info" | "warn" | "error";
 
-/** `agent` events come from the model loop; `backend` events from Inklet. */
+/** `agent` events come from the model loop; `backend` events from inklet. */
 export type AnalysisEventSource = "agent" | "backend";
 
 /**
@@ -40,7 +40,7 @@ export type AnalysisEventSource = "agent" | "backend";
  * The stream an Analysis publishes to you is a projection, not the run's
  * internal log: it answers "where is this now" rather than "how is it doing
  * it". The agent's turns, its individual tool calls, the kernel it chose, and
- * the sentences a rejected plan was faulted for stay inside Inklet and never
+ * the sentences a rejected plan was faulted for stay inside inklet and never
  * appear here, so nothing in your UI is pinned to our directory layout or to
  * which tool happens to read what.
  */

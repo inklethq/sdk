@@ -304,7 +304,7 @@ export class ConversationsResource {
     });
     if (answer.state === "failed" || failure !== undefined) {
       throw new AnalysisFailedError(
-        answer.failure?.message ?? failure?.summary ?? "Inklet could not answer.",
+        answer.failure?.message ?? failure?.summary ?? "inklet could not answer.",
         {
           analysisId: sent.reply.analysisId,
           details: {
