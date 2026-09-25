@@ -523,7 +523,7 @@ describe("Inklet error mapping for 413, 429, and bodies that are not JSON", () =
       assert.equal(error.status, 502);
       assert.equal(error.code, "api_error");
       assert.equal(error.requestId, "req_gw");
-      assert.equal(error.message, "The Inklet API returned HTTP 502: 502 Bad Gateway");
+      assert.equal(error.message, "The inklet API returned HTTP 502: 502 Bad Gateway");
       return true;
     });
   });
@@ -539,7 +539,7 @@ describe("Inklet error mapping for 413, 429, and bodies that are not JSON", () =
 
     await assert.rejects(client.request("/status"), (error) => {
       assert.ok(error instanceof ApiError);
-      assert.match(error.message, /^The Inklet API returned HTTP 500: upstream failure x+/);
+      assert.match(error.message, /^The inklet API returned HTTP 500: upstream failure x+/);
       assert.ok(error.message.endsWith("…"));
       assert.ok(error.message.length < 260, `${error.message.length} characters`);
       assert.doesNotMatch(error.message, /[\r\n\t]/);
@@ -559,7 +559,7 @@ describe("Inklet error mapping for 413, 429, and bodies that are not JSON", () =
         }),
     });
     await assert.rejects(client.request("/status"), (error) => {
-      assert.equal(error.message, "The Inklet API returned HTTP 504.");
+      assert.equal(error.message, "The inklet API returned HTTP 504.");
       return true;
     });
   });
