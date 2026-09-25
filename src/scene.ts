@@ -23,7 +23,7 @@ export interface PresentationViewport {
 /**
  * Requested output for a targetless Presentation.
  *
- * When neither `preset` nor `viewport` is supplied, Inklet uses its default
+ * When neither `preset` nor `viewport` is supplied, inklet uses its default
  * preview profile. `preset` and `viewport` are mutually exclusive.
  */
 export interface PresentationOutputRequest {
@@ -34,7 +34,7 @@ export interface PresentationOutputRequest {
 }
 
 /**
- * The normalized output profile persisted by Inklet. A format or colour mode
+ * The normalized output profile persisted by inklet. A format or colour mode
  * added after this SDK shipped arrives as its own string.
  */
 export interface PresentationOutput {

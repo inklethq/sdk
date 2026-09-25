@@ -355,7 +355,7 @@ export class AnalysesResource {
       settle: (analysis) => {
         if (analysis.state === "failed") {
           throw new AnalysisFailedError(
-            analysis.failure?.message ?? "Inklet could not complete the Analysis.",
+            analysis.failure?.message ?? "inklet could not complete the Analysis.",
             {
               analysisId: analysis.id,
               details: analysis.failure

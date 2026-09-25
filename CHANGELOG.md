@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.1
+
+- The product name is written `inklet`, lower-case i, in every message and
+  in the README. Identifiers such as `Inklet` and `InkletClient` are
+  unchanged.
+
 ## 0.4.0
 
 - Add `conversations`, the Ask inklet resource (`CONVERSATION_CONTRACT.md`):
@@ -126,7 +132,7 @@ about surviving a backend that grows under the SDK and a network that stalls.
 - **Fix:** `AssetUploadError.cause` is the underlying failure of the first Asset
   that still failed; it used to be dropped.
 - **Fix:** A non-JSON error body, such as a proxy's HTML page, becomes a short
-  message — `The Inklet API returned HTTP 502: …` with the page's `<title>` or
+  message — `The inklet API returned HTTP 502: …` with the page's `<title>` or
   at most 200 characters of its text, credentials redacted — instead of the
   whole page.
 - **Fix:** A bare `event: end` frame with no `data:` line ends `watch()`. It was

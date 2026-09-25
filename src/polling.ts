@@ -9,7 +9,7 @@ import {
 /**
  * Statuses that say "not right now" rather than "no": the request timed out
  * on the way in, the caller is being throttled, or something between the SDK
- * and Inklet failed for a moment.
+ * and inklet failed for a moment.
  */
 const TRANSIENT_STATUSES: ReadonlySet<number> = new Set([
   408, 429, 500, 502, 503, 504,

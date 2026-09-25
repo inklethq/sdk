@@ -90,7 +90,7 @@ export function validateAsset(asset: InkletAsset): void {
       validateBinaryAsset(asset);
       break;
     default:
-      throw new ConfigurationError("Unsupported Inklet asset type.");
+      throw new ConfigurationError("Unsupported inklet asset type.");
   }
 }
 

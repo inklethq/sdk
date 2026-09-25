@@ -405,7 +405,7 @@ export class ContentsResource {
     if (failed.size > 0) {
       const failedAssetIndexes = [...failed.keys()];
       throw new AssetUploadError(
-        "One or more Inklet assets could not be uploaded after refreshing their upload tickets.",
+        "One or more inklet assets could not be uploaded after refreshing their upload tickets.",
         {
           contentId,
           failedAssetIndexes,
@@ -706,7 +706,7 @@ async function uploadTickets(
       return ticket.assetIndex;
     }),
   );
-  throwIfAborted(signal, "The Inklet asset upload was aborted.");
+  throwIfAborted(signal, "The inklet asset upload was aborted.");
 
   const failed: [number, unknown][] = [];
   results.forEach((result, index) => {

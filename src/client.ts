@@ -41,8 +41,8 @@ export const DEFAULT_INKLET_BASE_URL = "https://dev.iminklet.com";
 
 const DEFAULT_TIMEOUT_MS = 60_000;
 const DEFAULT_UPLOAD_TIMEOUT_MS = 5 * 60_000;
-const REQUEST_ABORTED = "The Inklet request was aborted.";
-const UPLOAD_ABORTED = "The Inklet asset upload was aborted.";
+const REQUEST_ABORTED = "The inklet request was aborted.";
+const UPLOAD_ABORTED = "The inklet asset upload was aborted.";
 /** How much of a non-JSON error body makes it into `error.message`. */
 const MAX_ERROR_EXCERPT_LENGTH = 200;
 
@@ -53,7 +53,7 @@ type FetchImplementation = (
 
 export interface InkletClientOptions {
   /**
-   * A server-side personal access token created in the Inklet portal.
+   * A server-side personal access token created in the inklet portal.
    */
   pat?: string;
 
@@ -63,7 +63,7 @@ export interface InkletClientOptions {
   secretKey?: string;
 
   /**
-   * Inklet Cloud is used by default. Override this for a controlled local
+   * inklet Cloud is used by default. Override this for a controlled local
    * Compute Hub or a test server.
    */
   baseUrl?: string;
@@ -161,7 +161,7 @@ interface ErrorPayload {
 }
 
 /**
- * Server-only client for the Inklet API.
+ * Server-only client for the inklet API.
  *
  * Construction is side-effect free: the first network request is only made
  * when `request` (or a resource method built on it) is called.
@@ -276,7 +276,7 @@ export class InkletClient {
         text = await response.text();
       } catch {
         throw failure(
-          `The connection to ${new URL(this.baseUrl).origin} closed before the Inklet response was complete.`,
+          `The connection to ${new URL(this.baseUrl).origin} closed before the inklet response was complete.`,
           { status: response.status, requestId },
         );
       }
@@ -323,7 +323,7 @@ export class InkletClient {
 
     if (json !== undefined && body !== undefined && body !== null) {
       throw new ConfigurationError(
-        "An Inklet request cannot include both `json` and `body`.",
+        "An inklet request cannot include both `json` and `body`.",
       );
     }
 
@@ -356,7 +356,7 @@ export class InkletClient {
     const failure: Exchange["failure"] = (message, context = {}) => {
       if (deadline.timedOut) {
         return new RequestTimeoutError(
-          `The Inklet request to ${origin} did not complete within ${timeout} ms.`,
+          `The inklet request to ${origin} did not complete within ${timeout} ms.`,
           { ...context, timeoutMs: timeout },
         );
       }
@@ -390,7 +390,7 @@ export class InkletClient {
       // The cause is deliberately dropped: a runtime's connection error can
       // echo request details, credentials included.
       throw failure(
-        `Unable to reach the Inklet service at ${origin}. Check the service address and network connection.`,
+        `Unable to reach the inklet service at ${origin}. Check the service address and network connection.`,
       );
     }
 
@@ -435,7 +435,7 @@ export class InkletClient {
     } catch {
       if (deadline.timedOut) {
         throw new RequestTimeoutError(
-          `Uploading an Inklet asset did not finish within ${this.#uploadTimeoutMs} ms.`,
+          `Uploading an inklet asset did not finish within ${this.#uploadTimeoutMs} ms.`,
           { timeoutMs: this.#uploadTimeoutMs },
         );
       }
@@ -443,14 +443,14 @@ export class InkletClient {
         throw new OperationAbortedError(UPLOAD_ABORTED, { cause: signal.reason });
       }
       throw new NetworkError(
-        "Unable to upload an Inklet asset. Check the network connection and retry the Push.",
+        "Unable to upload an inklet asset. Check the network connection and retry the Push.",
       );
     } finally {
       deadline.dispose();
     }
 
     if (!response.ok) {
-      throw new ApiError("Inklet asset storage rejected the upload.", {
+      throw new ApiError("inklet asset storage rejected the upload.", {
         status: response.status,
         code: "asset_upload_failed",
       });
@@ -473,7 +473,7 @@ function resolveSecretKey(options: InkletClientOptions): string {
   const credential = secretKey ?? pat;
   if (!credential) {
     throw new ConfigurationError(
-      "A non-empty Inklet personal access token is required.",
+      "A non-empty inklet personal access token is required.",
     );
   }
 
@@ -487,7 +487,7 @@ function normalizeCredential(value: string | undefined): string | undefined {
 
   if (typeof value !== "string" || value.trim().length === 0) {
     throw new ConfigurationError(
-      "The Inklet personal access token must be a non-empty string.",
+      "The inklet personal access token must be a non-empty string.",
     );
   }
 
@@ -519,20 +519,20 @@ function normalizeBaseUrl(value: string | undefined): string {
     url = new URL(candidate);
   } catch (cause) {
     throw new ConfigurationError(
-      "The Inklet `baseUrl` must be an absolute HTTP or HTTPS URL.",
+      "The inklet `baseUrl` must be an absolute HTTP or HTTPS URL.",
       { cause },
     );
   }
 
   if (url.protocol !== "https:" && url.protocol !== "http:") {
     throw new ConfigurationError(
-      "The Inklet `baseUrl` must use HTTP or HTTPS.",
+      "The inklet `baseUrl` must use HTTP or HTTPS.",
     );
   }
 
   if (url.username || url.password || url.search || url.hash) {
     throw new ConfigurationError(
-      "The Inklet `baseUrl` cannot contain credentials, a query, or a fragment.",
+      "The inklet `baseUrl` cannot contain credentials, a query, or a fragment.",
     );
   }
 
@@ -556,7 +556,7 @@ function resolveFetch(
 function resolveRequestUrl(baseUrl: string, path: string): URL {
   if (typeof path !== "string" || path.trim().length === 0) {
     throw new ConfigurationError(
-      "Inklet request paths must be non-empty strings.",
+      "inklet request paths must be non-empty strings.",
     );
   }
 
@@ -567,7 +567,7 @@ function resolveRequestUrl(baseUrl: string, path: string): URL {
     trimmedPath.includes("\\")
   ) {
     throw new ConfigurationError(
-      "Inklet request paths must be relative to the configured service address.",
+      "inklet request paths must be relative to the configured service address.",
     );
   }
 
@@ -575,7 +575,7 @@ function resolveRequestUrl(baseUrl: string, path: string): URL {
   const requestUrl = new URL(relativePath, `${baseUrl}/`);
   if (requestUrl.origin !== new URL(baseUrl).origin) {
     throw new ConfigurationError(
-      "Inklet request paths cannot target a different origin.",
+      "inklet request paths cannot target a different origin.",
     );
   }
 
@@ -648,7 +648,7 @@ async function createResponseError(
 
   if (response.status === 404) {
     return new NotFoundError(
-      safeMessage || "The requested Inklet resource was not found.",
+      safeMessage || "The requested inklet resource was not found.",
       { ...options, code: serverCode ?? "not_found" },
     );
   }
@@ -671,7 +671,7 @@ async function createResponseError(
 
   if (response.status === 429) {
     return new RateLimitError(
-      safeMessage || "The Inklet API rate limit was exceeded. Retry later.",
+      safeMessage || "The inklet API rate limit was exceeded. Retry later.",
       { ...options, code: serverCode ?? "rate_limited", retryAfterMs },
     );
   }
@@ -699,11 +699,11 @@ async function readErrorPayload(
   }
 
   if (!isJsonResponse(response)) {
-    // Usually a proxy or gateway page rather than Inklet itself. Its text is
+    // Usually a proxy or gateway page rather than inklet itself. Its text is
     // not written for a log line, so only a short plain-text excerpt is kept.
     const excerpt = excerptBody(redactCredential(text, secretKey));
     return excerpt
-      ? { message: `The Inklet API returned HTTP ${response.status}: ${excerpt}` }
+      ? { message: `The inklet API returned HTTP ${response.status}: ${excerpt}` }
       : {};
   }
 
@@ -782,5 +782,5 @@ function excerptBody(text: string): string {
 }
 
 function defaultErrorMessage(status: number): string {
-  return `The Inklet API returned HTTP ${status}.`;
+  return `The inklet API returned HTTP ${status}.`;
 }

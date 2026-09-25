@@ -75,13 +75,13 @@ export class PushResource {
     this.#analyses = analyses;
   }
 
-  /** Inklet chooses one or more compatible Displays. */
+  /** inklet chooses one or more compatible Displays. */
   async auto(input: AutoPushInput, options: CallOptions = {}): Promise<AutoPushResult> {
     requireAssets("Auto", input);
     return this.#uploadAndAnalyze(input, input.assets, undefined, options);
   }
 
-  /** Inklet organizes the Assets for exactly one Display. */
+  /** inklet organizes the Assets for exactly one Display. */
   async manual(
     input: ManualPushInput,
     options: CallOptions = {},
