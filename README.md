@@ -511,7 +511,8 @@ round is its event stream: `assistant.delta` carries the text as it is written,
 yourself — a Portal relaying deltas to a browser does exactly that.
 
 `retrieve()` returns a Conversation with its most recent fifty Messages, oldest
-first; `listMessages({ before })` pages further back. Chat rounds stay out of
+first; `listMessages({ before })` pages further back. `rename(id, title)` sets
+the title by hand; a manual title is never replaced by automatic naming. Chat rounds stay out of
 `analyses.list()` unless you ask with `{ mode: "chat" }`, so a history of cards
 does not fill up with questions. Asking needs the `ai_chat` capability (Pro);
 without it `send()` rejects with `SubscriptionRequiredError`, and while the
