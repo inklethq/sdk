@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.2
+
+- Add `conversations.rename(id, title)` (`PATCH /conversations/{id}`).
+  The title is trimmed and must be 1–200 characters; a manual title is
+  never replaced by automatic naming.
+
 ## 0.4.1
 
 - The product name is written `inklet`, lower-case i, in every message and

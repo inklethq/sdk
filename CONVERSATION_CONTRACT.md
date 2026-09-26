@@ -28,7 +28,7 @@ Conversation ──< Message(user) ──1:1── Message(assistant) ──1:1�
 
 | 对象 | 说明 |
 | --- | --- |
-| Conversation | 一个用户的一段对话：`id`、`title`（首条消息摘出，可改）、时间戳。 |
+| Conversation | 一个用户的一段对话：`id`、`title`（模型概括主题，可改）、时间戳。 |
 | Message | `role` ∈ `user` / `assistant`。用户消息创建即 `completed`；助手消息随其 Analysis 推进：`queued → running → completed / failed`。`text` 在 `completed` 时定稿。 |
 | Analysis(mode = chat) | 一轮回复的运行体。`contentIds = []`、`context = history`、`target = null`、`settings.conversationId` / `settings.replyMessageId`。它**不产生 Presentation**（`outcome = reply`），除非 agent 在这一轮里调了创建卡片的工具 —— 那会是**另一条**独立的 Analysis，由本轮的事件引用。 |
 
@@ -53,8 +53,10 @@ Idempotency-Key: 可选
 { "title": null }
 ```
 
-`201` 返回 Conversation。`title` 为空时在首条用户消息落库后由后端摘出（首行，≤ 60
-字符），之后不再自动改。
+`201` 返回 Conversation。`title` 为空时先保持 `null`（客户端显示 New conversation），模型回复时通过 `name_conversation` 概括简短主题（单行，≤ 60 字符）。不再截取第一句话。命名失败不阻塞回复，下一轮仍可补全；已有标题不自动改写。
+
+重命名：`PATCH /conversations/{conversationId}`，body `{ "title": "Weekend reading" }`。
+标题 trim 后必须非空、≤ 200 字符。`200` 返回更新后的 Conversation；不属于当前用户或不存在返回 `404 conversation_not_found`。手动改名与自动命名并发时，手动标题优先。
 
 ### 4.2 列表与读取
 
@@ -164,10 +166,11 @@ lease 响应的 `snapshot` 对 `mode = chat` 增加：
 `templates = []`。
 `scope` 是套餐允许的历史窗口，`search_knowledge` 只能在这个窗口里搜。
 
-工具（全部通过现有 `/internal/agent/*` 或本契约新增的内部接口，带 run token）：
+工具（除本轮暂存标题的 `name_conversation` 外，全部通过现有 `/internal/agent/*` 或本契约新增的内部接口，带 run token）：
 
 | 工具 | 内部接口 | 说明 |
 | --- | --- | --- |
+| `name_conversation({ title })` | 无，随 reply 一并提交 | 仅 title 为 null 时提供；模型概括 2–6 词的主题，使用用户语言，不复制首句。计入工具预算。 |
 | `search_knowledge(q, limit)` | `GET /internal/agent/contents?q=&limit=` | 第一阶段的搜索，窗口由 run token 限定。返回标题、一行摘要、时间。 |
 | `read_content(contentId)` | `GET /internal/agent/contents/{id}` + `GET /internal/agent/assets/{id}/text` | 读一条的全文（素材 digest）。 |
 | `list_displays()` | `GET /internal/agent/displays` | 名字、在线、当前在显示什么。 |
@@ -197,6 +200,10 @@ Authorization: Bearer <run token>
 把助手消息置 `completed`、写 `text` / `citations` / `actions`（actions 从本轮已记录
 的动作事件汇总），Analysis 置 `completed` / `outcome = reply`，结算额度。`200` 返回
 Message。`409 attempt_superseded` 同 plan。
+
+成功 reply 可选 `conversationTitle`（trim 后单行 1–60 字符）。后端在同一事务中仅对当前用户、当前对话且 `title IS NULL` 的行写入；已有标题（包括生成期间手动改名）保持不变。该字段不进入 `text` 或 `assistant.delta`。
+
+发布顺序：先发布接受可选字段的 backend，再发布 worker 和客户端；旧 worker 仍可提交不带标题的 reply。无需迁移或改写历史会话。
 
 失败：worker 走现有的 failure 提交路径（`POST /plan` 的 failure 分支保持不变，或
 `reply` 带 `failure` 字段），后端把助手消息置 `failed`、`failure` 落库、释放额度。

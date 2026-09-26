@@ -231,6 +231,18 @@ export class ConversationsResource {
     };
   }
 
+  /** Rename a conversation. A manual title is never replaced by automatic naming. */
+  async rename(conversationId: string, title: string, options: CallOptions = {}): Promise<Conversation> {
+    const id = encodePathSegment(conversationId, "conversationId");
+    if (typeof title !== "string" || !title.trim() || [...title.trim()].length > 200) {
+      throw new ConfigurationError("title must contain 1–200 characters.");
+    }
+    const response = await this.#transport.request(`${SDK_API_PREFIX}/conversations/${id}`, {
+      ...callOptions(options), method: "PATCH", json: { title: title.trim() },
+    });
+    return parseConversation(expectRecord(response));
+  }
+
   /** Delete a Conversation and its Messages. The Analyses behind them stay. */
   async delete(conversationId: string, options: CallOptions = {}): Promise<void> {
     const id = encodePathSegment(conversationId, "conversationId");

@@ -82,6 +82,9 @@ function chatBackend({ events, reply = replyFixture(), onRequest = () => {} } = 
     if (method === "GET" && url.pathname === "/api/sdk/v1/conversations") {
       return json({ items: [conversationFixture({ title: "牙医" })], nextCursor: null, hasMore: false });
     }
+    if (method === "PATCH" && url.pathname === `/api/sdk/v1/conversations/${CONVERSATION_ID}`) {
+      return json(conversationFixture({ title: JSON.parse(init.body).title }));
+    }
     if (method === "DELETE" && url.pathname === `/api/sdk/v1/conversations/${CONVERSATION_ID}`) {
       return new Response(null, { status: 204 });
     }
@@ -125,6 +128,18 @@ const ROUND = [
 ];
 
 describe("Conversations", () => {
+  it("renames with PATCH and rejects empty or oversized titles", async () => {
+    const calls = [];
+    const client = new Inklet({ pat: PAT, fetch: chatBackend({ events: ROUND, onRequest: (c) => calls.push(c) }) });
+    const updated = await client.conversations.rename(CONVERSATION_ID, "  周末阅读  ");
+    assert.equal(updated.title, "周末阅读");
+    assert.equal(calls[0].method, "PATCH");
+    for (const title of ["", "  ", "字".repeat(201)]) {
+      await assert.rejects(client.conversations.rename(CONVERSATION_ID, title));
+    }
+    assert.equal(calls.length, 1);
+  });
+
   it("creates, lists, reads, pages and deletes", async () => {
     const calls = [];
     const client = new Inklet({ pat: PAT, fetch: chatBackend({ events: ROUND, onRequest: (c) => calls.push(c) }) });
